@@ -21,7 +21,7 @@ echo [2/4] Installation dependances...
 "%PYTHON%" -m pip install -r requirements.txt
 
 echo [3/4] Build EXE x86...
-"%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name scan_system_x86 --distpath dist_x86 scanner_windows.py
+"%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name scan_system_x86 --distpath dist_x86 --icon "pictures\scan_system.ico" --add-data "pictures\scan_system.ico;pictures" --add-data "pictures\icon_64x64.png;pictures" scanner_windows.py
 if errorlevel 1 (
   echo [ERREUR] Echec compilation EXE x86.
   exit /b 1

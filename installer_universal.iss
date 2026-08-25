@@ -29,6 +29,7 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x86compatible x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=pictures\scan_system.ico
 SetupLogging=yes
 
 [Languages]
@@ -44,12 +45,12 @@ Source: "dist\scan_system.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; F
 ; x86 machine: install x86 build
 Source: "dist_x86\scan_system_x86.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion; Check: not IsWin64
 
-[Dirs]
-Name: "{commonappdata}\Scan System\Reports"
-
 [Icons]
 Name: "{autoprograms}\Scan System"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\Scan System"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Lancer Scan System"; Flags: nowait postinstall skipifsilent
@@ -123,6 +124,18 @@ begin
 		MsgBox('La desinstallation de l''ancienne version a retourne un code: ' + IntToStr(ResultCode), mbError, MB_OK);
 		Result := False;
 		exit;
+	end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+	if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
+	begin
+		if MsgBox('Supprimer aussi les donnees utilisateur (rapports d''audit, cache des flux de menaces, logs) ?' + #13#10 + #13#10 +
+			'Cette action est irreversible.', mbConfirmation, MB_YESNO) = IDYES then
+		begin
+			DelTree(ExpandConstant('{localappdata}\ScanSystem'), True, True, True);
+		end;
 	end;
 end;
 

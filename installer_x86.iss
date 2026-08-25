@@ -28,6 +28,7 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x86compatible
 ArchitecturesInstallIn64BitMode=x86compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=pictures\scan_system.ico
 SetupLogging=yes
 
 [Languages]
@@ -40,12 +41,25 @@ Name: "desktopicon"; Description: "Creer un raccourci sur le bureau"; GroupDescr
 [Files]
 Source: "dist_x86\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
-[Dirs]
-Name: "{commonappdata}\Scan System\Reports"
-
 [Icons]
 Name: "{autoprograms}\Scan System (32-bit)"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\Scan System (32-bit)"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Lancer Scan System (32-bit)"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
+  begin
+    if MsgBox('Supprimer aussi les donnees utilisateur (rapports d''audit, cache des flux de menaces, logs) ?' + #13#10 + #13#10 +
+      'Cette action est irreversible.', mbConfirmation, MB_YESNO) = IDYES then
+    begin
+      DelTree(ExpandConstant('{localappdata}\ScanSystem'), True, True, True);
+    end;
+  end;
+end;

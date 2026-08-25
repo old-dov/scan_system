@@ -20,7 +20,7 @@ if errorlevel 1 (
 )
 
 echo [2/3] Building EXE with PyInstaller...
-"%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name scan_system scanner_windows.py
+"%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name scan_system --icon "pictures\scan_system.ico" --add-data "pictures\scan_system.ico;pictures" --add-data "pictures\icon_64x64.png;pictures" scanner_windows.py
 if errorlevel 1 (
   echo [ERREUR] Echec compilation EXE x64.
   exit /b 1

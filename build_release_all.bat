@@ -8,7 +8,7 @@ echo [1/6] Build x64 exe...
 if exist "%PY64%" (
   "%PY64%" -m pip install -r requirements.txt
   if errorlevel 1 exit /b 1
-  "%PY64%" -m PyInstaller --clean --noconfirm --onefile --windowed --name scan_system scanner_windows.py
+  "%PY64%" -m PyInstaller --clean --noconfirm --onefile --windowed --name scan_system --icon "pictures\scan_system.ico" --add-data "pictures\scan_system.ico;pictures" --add-data "pictures\icon_64x64.png;pictures" scanner_windows.py
 ) else (
   echo [ERREUR] Python x64 venv introuvable: %PY64%
   exit /b 1

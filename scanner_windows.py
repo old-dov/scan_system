@@ -53,6 +53,13 @@ THREAT_FEEDS = [
 ]
 
 
+def resource_path(relative: str) -> Path:
+    """Resout un fichier ressource bundle (icones...), en script comme en exe PyInstaller
+    --onefile (extrait dans sys._MEIPASS a l'execution)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative
+
+
 def app_log_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA", str(Path.home()))
     p = Path(base) / "ScanSystem"
@@ -178,7 +185,11 @@ def run_powershell(command: str, timeout: int = 180) -> tuple[bool, str]:
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "text": True,
-                "encoding": "utf-8",
+                # powershell.exe (sans console allouee, CREATE_NO_WINDOW) ecrit sa sortie dans la
+                # codepage OEM de la machine (ex: cp850), pas en UTF-8 -- "oem" est l'alias Windows
+                # de Python qui s'adapte a la codepage OEM reelle, sinon les caracteres accentues
+                # (messages Get-WinEvent en francais, etc.) sont corrompus a la lecture.
+                "encoding": "oem",
                 "errors": "replace",
                 "startupinfo": startupinfo,
                 "creationflags": creationflags,
@@ -213,7 +224,7 @@ def run_hidden_command(command: list[str], timeout: int = 180) -> tuple[bool, st
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "text": True,
-                "encoding": "utf-8",
+                "encoding": "oem",
                 "errors": "replace",
                 "startupinfo": startupinfo,
                 "creationflags": creationflags,
@@ -399,8 +410,10 @@ def collect_realtime_snapshot(previous: dict[str, Any]) -> dict[str, Any]:
                 previous["startup_fp"] = current_fp
 
         lookback = dt.datetime.now() - dt.timedelta(minutes=70)
-        task_events = recent_task_scheduler_events(1)
-        service_events = recent_service_installs(1)
+        # Fenetre resserree a la cadence de sondage (+marge) plutot que 24h a chaque passage :
+        # cf. _event_log_start_expr, gain direct sur le cout CPU de chaque Get-WinEvent.
+        since = dt.datetime.now() - dt.timedelta(seconds=90)
+        task_events, service_events = recent_persistence_events(1, since=since)
 
         seen_tasks = previous.get("seen_tasks")
         seen_services = previous.get("seen_services")
@@ -900,50 +913,50 @@ def startup_entries() -> list[dict[str, Any]]:
     return entries
 
 
-def recent_task_scheduler_events(days: int) -> list[dict[str, Any]]:
-    # Event ID 106: task registered/created
+def _event_log_start_expr(days: int, since: dt.datetime | None) -> str:
+    # `since` permet de ne rescanner qu'une petite fenetre recente (utilise par le sondage temps
+    # reel, toutes les 60s) plutot que les `days` complets a chaque appel (utilise par l'audit
+    # complet) -- un `Get-WinEvent` sur 24h repete toutes les minutes est le principal poste de
+    # cout CPU du sondage en arriere-plan, sans rapport avec un audit manuel.
+    if since is not None:
+        return f"[datetime]'{since.strftime('%Y-%m-%dT%H:%M:%S')}'"
+    return f"(Get-Date).AddDays(-{days})"
+
+
+def recent_persistence_events(
+    days: int, since: dt.datetime | None = None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Taches planifiees (event 106) + services installes (event 7045) en un seul appel
+    PowerShell plutot que deux. Mesure faite : le cout dominant d'un `run_powershell()` est le
+    demarrage de powershell.exe lui-meme (3-7s observes sur cette machine), pas la requete
+    Get-WinEvent -- fusionner les deux requetes divise ce cout fixe par 2, a chaque cycle du
+    sondage temps reel (toutes les 60s) et a chaque audit complet."""
+    start_expr = _event_log_start_expr(days, since)
     ps = textwrap.dedent(
         f"""
-        Get-WinEvent -FilterHashtable @{{
-            LogName='Microsoft-Windows-TaskScheduler/Operational';
-            Id=106;
-            StartTime=(Get-Date).AddDays(-{days})
-        }} |
-        Select-Object TimeCreated, Id, Message |
-        ConvertTo-Json -Depth 4
+        $tasks = @(Get-WinEvent -FilterHashtable @{{
+            LogName='Microsoft-Windows-TaskScheduler/Operational'; Id=106; StartTime={start_expr}
+        }} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message)
+        $services = @(Get-WinEvent -FilterHashtable @{{
+            LogName='System'; Id=7045; StartTime={start_expr}
+        }} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, ProviderName, Message)
+        [PSCustomObject]@{{ tasks = $tasks; services = $services }} | ConvertTo-Json -Depth 4
         """
     ).strip()
     ok, out = run_powershell(ps, timeout=120)
     if not ok or not out:
-        return []
+        return [], []
     try:
         data = json.loads(out)
-        if isinstance(data, dict):
-            data = [data]
-        return data
     except json.JSONDecodeError:
-        return []
-
-
-def recent_service_installs(days: int) -> list[dict[str, Any]]:
-    # Event ID 7045 (System): a service was installed.
-    ps = textwrap.dedent(
-        f"""
-        Get-WinEvent -FilterHashtable @{{LogName='System'; Id=7045; StartTime=(Get-Date).AddDays(-{days})}} |
-        Select-Object TimeCreated, Id, ProviderName, Message |
-        ConvertTo-Json -Depth 4
-        """
-    ).strip()
-    ok, out = run_powershell(ps, timeout=120)
-    if not ok or not out:
-        return []
-    try:
-        data = json.loads(out)
-        if isinstance(data, dict):
-            data = [data]
-        return data
-    except json.JSONDecodeError:
-        return []
+        return [], []
+    tasks = data.get("tasks") or []
+    services = data.get("services") or []
+    if isinstance(tasks, dict):
+        tasks = [tasks]
+    if isinstance(services, dict):
+        services = [services]
+    return tasks, services
 
 
 def suspicious_score(report: dict[str, Any]) -> dict[str, Any]:
@@ -1127,10 +1140,10 @@ def generate_report(
     report["defender_threat_detections"] = defender_threat_detections()
     step("Installations recentes...", 83)
     report["recent_installs"] = recent_installs(days)
-    step("Services recents...", 86)
-    report["recent_service_installs"] = recent_service_installs(days)
-    step("Taches planifiees...", 89)
-    report["recent_task_registrations"] = recent_task_scheduler_events(days)
+    step("Services et taches recents...", 87)
+    task_events, service_events = recent_persistence_events(days)
+    report["recent_service_installs"] = service_events
+    report["recent_task_registrations"] = task_events
     step("Mise a jour des flux de menaces...", 92)
     if output_dir is not None:
         report["threat_feeds_refresh"] = refresh_threat_feeds_cache(output_dir)
@@ -1232,15 +1245,18 @@ def launch_gui(
 
     try:
         import pystray  # type: ignore
-        from PIL import Image, ImageDraw  # type: ignore
+        from PIL import Image  # type: ignore
     except Exception:
         pystray = None
         Image = None
-        ImageDraw = None
 
     root = tk.Tk()
     root.title("Scan System - Audit securite Windows")
     root.geometry("1220x760")
+    try:
+        root.iconbitmap(default=str(resource_path("pictures/scan_system.ico")))
+    except Exception:
+        pass
 
     style = ttk.Style()
     current_theme = detect_windows_theme()
@@ -1326,6 +1342,21 @@ def launch_gui(
     # Threats tab
     threat_actions = ttk.Frame(tab_threats)
     threat_actions.pack(fill="x", pady=(0, 8))
+
+    threat_status_var = tk.StringVar(value="")
+    threat_elapsed_var = tk.StringVar(value="")
+
+    threat_progress_row = ttk.Frame(tab_threats)
+    threat_progress_row.pack(fill="x", pady=(0, 8))
+    threat_progress_bar = ttk.Progressbar(
+        threat_progress_row,
+        mode="indeterminate",
+        length=280,
+        style="Audit.Horizontal.TProgressbar",
+    )
+    threat_progress_bar.pack(side="left")
+    ttk.Label(threat_progress_row, textvariable=threat_status_var).pack(side="left", padx=(10, 0))
+    ttk.Label(threat_progress_row, textvariable=threat_elapsed_var).pack(side="right")
 
     threat_cols = ("name", "detected", "status", "resources")
     threat_tree = ttk.Treeview(tab_threats, columns=threat_cols, show="headings", selectmode="extended")
@@ -1466,13 +1497,12 @@ def launch_gui(
         last_anomaly_messages = last_anomaly_messages[-20:]
 
     def create_tray_image() -> Any:
-        if Image is None or ImageDraw is None:
+        if Image is None:
             return None
-        image = Image.new("RGB", (64, 64), color=(34, 139, 230) if current_theme == "light" else (30, 30, 30))
-        draw = ImageDraw.Draw(image)
-        draw.ellipse((10, 10, 54, 54), fill=(255, 255, 255), outline=(0, 0, 0))
-        draw.rectangle((28, 18, 36, 46), fill=(34, 139, 230))
-        return image
+        try:
+            return Image.open(resource_path("pictures/icon_64x64.png")).convert("RGBA")
+        except Exception:
+            return None
 
     def restore_from_tray() -> None:
         nonlocal tray_icon
@@ -1524,14 +1554,21 @@ def launch_gui(
 
     def minimize_to_tray() -> None:
         nonlocal tray_icon, tray_thread
-        if not monitoring_enabled.get() or pystray is None or tray_icon is not None:
+        if tray_icon is not None:
+            # Icone de tray deja active : c'est elle qui permet de rappeler la fenetre.
             root.withdraw()
+            return
+        if pystray is None:
+            # Pas d'icone de tray disponible (pystray absent) : ne PAS masquer completement
+            # (root.withdraw() rendrait la fenetre irrecuperable, sans bouton barre des taches
+            # ni icone de tray). On reduit normalement a la place.
+            root.iconify()
             return
 
         ensure_background_monitoring_ready()
         icon_image = create_tray_image()
         if icon_image is None:
-            root.withdraw()
+            root.iconify()
             return
 
         menu = pystray.Menu(
@@ -1560,23 +1597,42 @@ def launch_gui(
         if event.widget is root and monitoring_enabled.get() and root.state() == "iconic":
             minimize_to_tray()
 
+    realtime_busy = [False]
+
     def refresh_realtime() -> None:
-        snapshot = collect_realtime_snapshot(realtime_state)
-        cpu_var.set(f"CPU: {snapshot['cpu_percent']:.0f}%")
-        net_var.set(
-            f"Net: D {format_rate(snapshot['download_bps'])} | U {format_rate(snapshot['upload_bps'])}"
-        )
-        populate_realtime(snapshot.get("connections", []))
-        append_anomaly_lines(snapshot.get("anomalies", []))
-        if monitoring_enabled.get() and tray_icon is not None and snapshot.get("anomalies"):
-            new_items = [item for item in snapshot["anomalies"] if item not in last_notified_anomalies]
-            if new_items:
-                try:
-                    tray_icon.notify(" ; ".join(new_items[:2]), "Scan System")
-                except Exception:
-                    pass
-                last_notified_anomalies[:] = (last_notified_anomalies + new_items)[-10:]
-        root.after(2000, refresh_realtime)
+        # collect_realtime_snapshot() inclut, toutes les 60s, deux appels Get-WinEvent via
+        # PowerShell (cf. recent_task_scheduler_events/recent_service_installs) -- assez couteux
+        # pour geler l'UI et faire pic le CPU si execute sur le thread principal. Lance en arriere
+        # plan, avec un garde anti-chevauchement si un cycle precedent n'est pas encore termine.
+        if realtime_busy[0]:
+            root.after(2000, refresh_realtime)
+            return
+        realtime_busy[0] = True
+
+        def worker() -> None:
+            snapshot = collect_realtime_snapshot(realtime_state)
+
+            def apply_snapshot() -> None:
+                realtime_busy[0] = False
+                cpu_var.set(f"CPU: {snapshot['cpu_percent']:.0f}%")
+                net_var.set(
+                    f"Net: D {format_rate(snapshot['download_bps'])} | U {format_rate(snapshot['upload_bps'])}"
+                )
+                populate_realtime(snapshot.get("connections", []))
+                append_anomaly_lines(snapshot.get("anomalies", []))
+                if monitoring_enabled.get() and tray_icon is not None and snapshot.get("anomalies"):
+                    new_items = [item for item in snapshot["anomalies"] if item not in last_notified_anomalies]
+                    if new_items:
+                        try:
+                            tray_icon.notify(" ; ".join(new_items[:2]), "Scan System")
+                        except Exception:
+                            pass
+                        last_notified_anomalies[:] = (last_notified_anomalies + new_items)[-10:]
+                root.after(2000, refresh_realtime)
+
+            root.after(0, apply_snapshot)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def trace_selected_ip_gui() -> None:
         items = selected_realtime_items()
@@ -1709,6 +1765,30 @@ def launch_gui(
         text.insert("1.0", details)
         text.configure(state="disabled")
 
+    threat_op_running = [False]
+    threat_start_ts = [0.0]
+
+    def tick_threat_timer() -> None:
+        if not threat_op_running[0]:
+            return
+        threat_elapsed_var.set(format_elapsed(threat_start_ts[0]))
+        root.after(500, tick_threat_timer)
+
+    def start_threat_busy(label: str) -> None:
+        # Defender (Start-MpScan) ne fournit pas de pourcentage d'avancement via PowerShell --
+        # barre indeterminee (animation continue) + chrono, plutot qu'une fausse jauge chiffree.
+        threat_op_running[0] = True
+        threat_start_ts[0] = time.time()
+        threat_status_var.set(label)
+        threat_elapsed_var.set("00:00")
+        threat_progress_bar.start(50)
+        tick_threat_timer()
+
+    def stop_threat_busy(label: str) -> None:
+        threat_op_running[0] = False
+        threat_progress_bar.stop()
+        threat_status_var.set(label)
+
     def cleanup_defender_threats() -> None:
         items = selected_threat_items()
         if not items and not threat_items:
@@ -1722,8 +1802,12 @@ def launch_gui(
         )
         if not messagebox.askyesno("Nettoyage Defender", prompt):
             return
+        if threat_op_running[0]:
+            messagebox.showinfo("Information", "Une operation Defender est deja en cours.")
+            return
 
         log_line("[~] Demande de nettoyage Defender en cours...")
+        start_threat_busy("Nettoyage Defender en cours...")
 
         def worker() -> None:
             res = defender_remove_threats()
@@ -1731,9 +1815,11 @@ def launch_gui(
             def on_done() -> None:
                 if res.get("ok"):
                     log_line("[OK] Nettoyage Defender termine")
+                    stop_threat_busy(f"Nettoyage termine en {format_elapsed(threat_start_ts[0])}")
                     refresh_defender_threats()
                 else:
                     log_line(f"[ERREUR] Nettoyage Defender: {res.get('error', '')}")
+                    stop_threat_busy("Nettoyage Defender echoue")
                     messagebox.showerror("Erreur", f"Nettoyage Defender echoue.\n\n{res.get('error', '')}")
 
             root.after(0, on_done)
@@ -1743,7 +1829,12 @@ def launch_gui(
     def launch_full_scan_manual() -> None:
         if not messagebox.askyesno("Scan complet", "Lancer un scan complet Defender ?"):
             return
+        if threat_op_running[0]:
+            messagebox.showinfo("Information", "Une operation Defender est deja en cours.")
+            return
+
         log_line("[~] Demande de scan complet Defender...")
+        start_threat_busy("Scan complet Defender en cours (peut prendre longtemps)...")
 
         def worker() -> None:
             res = defender_full_scan()
@@ -1751,9 +1842,11 @@ def launch_gui(
             def on_done() -> None:
                 if res.get("ok"):
                     log_line("[OK] Scan complet Defender termine")
+                    stop_threat_busy(f"Scan complet termine en {format_elapsed(threat_start_ts[0])}")
                     refresh_defender_threats()
                 else:
                     log_line(f"[ERREUR] Scan complet Defender: {res.get('error', '')}")
+                    stop_threat_busy("Scan complet Defender echoue")
                     messagebox.showerror("Erreur", f"Scan complet echoue.\n\n{res.get('error', '')}")
 
             root.after(0, on_done)
@@ -1767,7 +1860,12 @@ def launch_gui(
         )
         if not messagebox.askyesno("Scan hors ligne", prompt):
             return
+        if threat_op_running[0]:
+            messagebox.showinfo("Information", "Une operation Defender est deja en cours.")
+            return
+
         log_line("[~] Demande de scan hors ligne Defender...")
+        start_threat_busy("Demande de scan hors ligne en cours...")
 
         def worker() -> None:
             res = defender_offline_scan()
@@ -1775,9 +1873,11 @@ def launch_gui(
             def on_done() -> None:
                 if res.get("ok"):
                     log_line("[OK] Scan hors ligne Defender demande")
+                    stop_threat_busy(f"Scan hors ligne demande en {format_elapsed(threat_start_ts[0])}")
                     messagebox.showinfo("Information", "La demande de scan hors ligne a ete envoyee a Defender.")
                 else:
                     log_line(f"[ERREUR] Scan hors ligne Defender: {res.get('error', '')}")
+                    stop_threat_busy("Scan hors ligne Defender echoue")
                     messagebox.showerror("Erreur", f"Scan hors ligne echoue.\n\n{res.get('error', '')}")
 
             root.after(0, on_done)
