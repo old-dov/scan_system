@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PyInstaller build artifacts (regeneres a chaque build_*.bat)
+build/
+dist/
+dist_x86/
+*.spec
+
+# Installeurs et packages generes
+installer_output/
+installer_output_x86/
+installer_output_universal/
+portable_output/
+
+# Rapports d'audit generes localement (donnees systeme, pas du code)
+reports/
+
+# OS
+Thumbs.db
+.DS_Store
