@@ -348,6 +348,13 @@ def list_public_connections() -> list[dict[str, Any]]:
     return sorted(connections, key=lambda item: (item["process_name"], item["remote"]))[:200]
 
 
+# Sondage temps reel uniquement (cf. collect_realtime_snapshot) -- pas l'audit ponctuel
+# (network_audit_snapshot), qui reste a 85% instantane : un seul tir par audit, pas de risque
+# de spam de notifications repetees.
+CPU_ANOMALY_THRESHOLD = 95
+CPU_ANOMALY_SUSTAINED_SAMPLES = 3  # ~6s a raison d'un cycle de 2s, filtre les pics ponctuels
+
+
 def collect_realtime_snapshot(previous: dict[str, Any]) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "cpu_percent": 0.0,
@@ -374,8 +381,17 @@ def collect_realtime_snapshot(previous: dict[str, Any]) -> dict[str, Any]:
     previous["sent"] = float(counters.bytes_sent)
     previous["recv"] = float(counters.bytes_recv)
 
-    if snapshot["cpu_percent"] >= 85:
-        snapshot["anomalies"].append(f"CPU eleve: {snapshot['cpu_percent']:.0f}%")
+    # Seuil releve (85 -> 95) et exige plusieurs cycles consecutifs au-dessus du seuil (pas
+    # un seul instantane) avant de compter comme anomalie : avec plusieurs grosses applications
+    # legitimes ouvertes en meme temps (Discord/Outlook/Edge/VSCode), le CPU dépasse 85% en
+    # continu sans rien d'anormal -- un seul echantillon a 85-94% n'est pas un signal fiable,
+    # cause de notifications percues comme des faux positifs frequents.
+    if snapshot["cpu_percent"] >= CPU_ANOMALY_THRESHOLD:
+        previous["cpu_high_streak"] = previous.get("cpu_high_streak", 0) + 1
+    else:
+        previous["cpu_high_streak"] = 0
+    if previous["cpu_high_streak"] >= CPU_ANOMALY_SUSTAINED_SAMPLES:
+        snapshot["anomalies"].append(f"CPU eleve soutenu: {snapshot['cpu_percent']:.0f}%")
     total_bps = snapshot["upload_bps"] + snapshot["download_bps"]
     if total_bps >= 5 * 1024 * 1024:
         snapshot["anomalies"].append(f"Debit reseau eleve: {format_rate(total_bps)}")
