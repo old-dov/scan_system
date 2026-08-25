@@ -1288,12 +1288,31 @@ def launch_gui(
     last_txt_report = ""
     audit_running = False
     realtime_state: dict[str, Any] = {}
-    last_anomaly_messages: list[str] = []
     tray_icon = None
     tray_thread = None
     monitoring_enabled = tk.BooleanVar(value=auto_monitoring)
     startup_enabled = tk.BooleanVar(value=is_startup_monitoring_enabled())
-    last_notified_anomalies: list[str] = []
+
+    def anomaly_kind(text: str) -> str:
+        # CPU/reseau embarquent une valeur qui fluctue en continu (ex. "CPU eleve: 87%" puis
+        # "89%") -- sans normaliser, chaque variation defait toute dedup par texte exact et spam
+        # les notifications alors que c'est le meme signal qui reste vrai en continu (cas reel :
+        # plusieurs grosses applications ouvertes en meme temps, Discord/Outlook/Edge/VSCode).
+        # Les autres anomalies (connexion suspecte, nouvelle entree startup...) embarquent une
+        # info distincte a chaque occurrence (IP, nom de process) -- texte complet pour elles,
+        # volontairement, deux alertes differentes ne doivent pas se supprimer l'une l'autre.
+        if text.startswith("CPU eleve") or text.startswith("Debit reseau eleve"):
+            return text.split(":", 1)[0]
+        return text
+
+    # Anti-spam par "type" d'anomalie plutot que par texte exact : cooldown avant de re-signaler
+    # le meme type, au lieu d'un "vu une fois, plus jamais" (qui masquerait un vrai probleme
+    # persistant apres la purge des 20 dernieres entrees) ou d'un "jamais vu, toujours nouveau"
+    # (le bug corrige ici).
+    last_anomaly_ts: dict[str, float] = {}
+    LOG_ANOMALY_COOLDOWN_S = 60.0
+    last_notified_ts: dict[str, float] = {}
+    NOTIFY_ANOMALY_COOLDOWN_S = 300.0
 
     days_var = tk.StringVar(value=str(default_days))
     output_var = tk.StringVar(value=str(resolve_output_dir(default_output)))
@@ -1485,16 +1504,16 @@ def launch_gui(
             )
 
     def append_anomaly_lines(lines: list[str]) -> None:
-        nonlocal last_anomaly_messages
         if not lines:
             return
+        now_ts = time.time()
         for line in lines:
-            if line in last_anomaly_messages:
+            kind = anomaly_kind(line)
+            if now_ts - last_anomaly_ts.get(kind, 0.0) < LOG_ANOMALY_COOLDOWN_S:
                 continue
+            last_anomaly_ts[kind] = now_ts
             rt_anomalies.insert("end", f"[{dt.datetime.now().strftime('%H:%M:%S')}] {line}\n")
             rt_anomalies.see("end")
-            last_anomaly_messages.append(line)
-        last_anomaly_messages = last_anomaly_messages[-20:]
 
     def create_tray_image() -> Any:
         if Image is None:
@@ -1621,13 +1640,18 @@ def launch_gui(
                 populate_realtime(snapshot.get("connections", []))
                 append_anomaly_lines(snapshot.get("anomalies", []))
                 if monitoring_enabled.get() and tray_icon is not None and snapshot.get("anomalies"):
-                    new_items = [item for item in snapshot["anomalies"] if item not in last_notified_anomalies]
+                    now_ts = time.time()
+                    new_items = []
+                    for item in snapshot["anomalies"]:
+                        kind = anomaly_kind(item)
+                        if now_ts - last_notified_ts.get(kind, 0.0) >= NOTIFY_ANOMALY_COOLDOWN_S:
+                            new_items.append(item)
+                            last_notified_ts[kind] = now_ts
                     if new_items:
                         try:
                             tray_icon.notify(" ; ".join(new_items[:2]), "Scan System")
                         except Exception:
                             pass
-                        last_notified_anomalies[:] = (last_notified_anomalies + new_items)[-10:]
                 root.after(2000, refresh_realtime)
 
             root.after(0, apply_snapshot)
