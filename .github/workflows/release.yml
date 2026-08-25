@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # La release ne doit jamais sortir de code casse -- meme garde que la CI, avant de
+      # passer du temps a compiler l'exe/l'installeur.
+      - name: Compile check + tests
+        run: |
+          python -m py_compile scanner_windows.py
+          python -m pytest tests/ -v
+
+      - name: Build x64 executable
+        run: .\build_exe.bat
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      # Appel direct de ISCC (plutot que build_installer.bat) : la version vient du tag git,
+      # pas d'un timestamp de build local, et pas de tentative de signature (differee, voir
+      # sign_file.bat) qui echouerait sans certificat sur le runner.
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          & $iscc /DMyAppVersion="$version" "installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "dist\scan_system.exe" `
+            "installer_output\ScanSystemSetup.exe" `
+            --title "Scan System ${{ github.ref_name }}" `
+            --generate-notes
