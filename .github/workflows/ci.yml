@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    # windows-latest : psutil/winreg/tkinter sont specifiques a la cible reelle de l'app
+    # (Windows uniquement) -- coherent avec le fait que scanner_windows.py ne pretend pas
+    # etre cross-platform.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Compile check
+        run: python -m py_compile scanner_windows.py
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
