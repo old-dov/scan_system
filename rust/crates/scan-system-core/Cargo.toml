@@ -1,0 +1,10 @@
+[package]
+name = "scan-system-core"
+description = "Platform-independent scoring/matching/report logic for scan_system, ported from scanner_windows.py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true }
