@@ -1,0 +1,16 @@
+[package]
+name = "scan-system-platform"
+description = "Windows-only: registry, Defender/PowerShell, firewall, cancellable process execution - ported from scanner_windows.py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+scan-system-core = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.59", features = ["Win32_Globalization"] }
