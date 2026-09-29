@@ -252,6 +252,25 @@ def detect_windows_theme() -> str:
         return "light"
 
 
+# Keep the desktop colors in step with OSINTBox's light and dark card themes.
+UI_COLORS = {
+    "light": {
+        "bg": "#fafaf9", "fg": "#101010", "surface": "#ffffff",
+        "header": "#ffffff", "divider": "#303030", "border": "#dedfdf",
+        "mark": "#e3e4e4", "button": "#303030", "button_hover": "#101010",
+        "button_disabled": "#ebebea", "disabled_fg": "#777777",
+        "selection": "#303030", "selection_fg": "#ffffff",
+    },
+    "dark": {
+        "bg": "#171b20", "fg": "#edf0f3", "surface": "#232a32",
+        "header": "#222830", "divider": "#52606e", "border": "#4a5561",
+        "mark": "#657483", "button": "#46596b", "button_hover": "#587087",
+        "button_disabled": "#303740", "disabled_fg": "#a0aab4",
+        "selection": "#769cbd", "selection_fg": "#10161c",
+    },
+}
+
+
 def format_rate(bytes_per_sec: float) -> str:
     bits = max(0.0, bytes_per_sec * 8.0)
     if bits >= 1_000_000_000:
@@ -1276,27 +1295,68 @@ def launch_gui(
 
     style = ttk.Style()
     current_theme = detect_windows_theme()
+    palette = UI_COLORS[current_theme]
     try:
-        style.theme_use("vista" if current_theme == "light" else "clam")
+        style.theme_use("clam")
     except Exception:
         pass
-    bg = "#f3f3f3" if current_theme == "light" else "#1f1f1f"
-    fg = "#111111" if current_theme == "light" else "#f2f2f2"
-    box_bg = "#ffffff" if current_theme == "light" else "#2b2b2b"
-    root.configure(bg=bg)
-    style.configure("TFrame", background=bg)
-    style.configure("TLabel", background=bg, foreground=fg)
-    style.configure("TNotebook", background=bg)
-    style.configure("TNotebook.Tab", padding=(10, 4))
-    style.configure("TButton", padding=(8, 4))
-    style.configure(
-        "Audit.Horizontal.TProgressbar",
-        background="#2ecc71",
-        troughcolor=box_bg,
-        bordercolor=box_bg,
-        lightcolor="#2ecc71",
-        darkcolor="#2ecc71",
-    )
+    bg = palette["bg"]
+    fg = palette["fg"]
+    box_bg = palette["surface"]
+    rule = palette["divider"]
+    hairline = palette["mark"]
+
+    def set_titlebar_theme(window: tk.Misc) -> None:
+        if platform.system().lower() != "windows":
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            user32.GetParent.argtypes = [ctypes.c_void_p]
+            user32.GetParent.restype = ctypes.c_void_p
+            client_hwnd = window.winfo_id()
+            hwnd = user32.GetParent(client_hwnd) or client_hwnd
+            enabled = ctypes.c_int(current_theme == "dark")
+            dwm_set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            dwm_set_attribute.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                          ctypes.c_void_p, ctypes.c_uint]
+            dwm_set_attribute(
+                hwnd, 20, ctypes.byref(enabled), ctypes.sizeof(enabled)
+            )
+        except (AttributeError, OSError, tk.TclError):
+            pass
+
+    def configure_theme_styles() -> None:
+        root.configure(bg=bg)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TNotebook", background=bg, bordercolor=palette["border"],
+                        relief="flat")
+        style.configure("TNotebook.Tab", background=palette["header"], foreground=fg,
+                        bordercolor=palette["border"], padding=(10, 4), relief="flat")
+        style.map("TNotebook.Tab", background=[("selected", palette["button"]),
+                                                ("active", palette["button_hover"])],
+                  foreground=[("selected", "#ffffff"), ("active", "#ffffff")])
+        style.configure("TButton", background=palette["button"], foreground="#ffffff",
+                        bordercolor=palette["border"], padding=(8, 4), relief="flat")
+        style.map("TButton", background=[("disabled", palette["button_disabled"]),
+                                          ("active", palette["button_hover"])],
+                  foreground=[("disabled", palette["disabled_fg"])])
+        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure("TEntry", fieldbackground=box_bg, foreground=fg,
+                        bordercolor=palette["border"], insertcolor=fg)
+        style.configure("Vertical.TScrollbar", background=palette["divider"],
+                        troughcolor=box_bg, bordercolor=palette["border"])
+        style.configure("Treeview", background=box_bg, fieldbackground=box_bg, foreground=fg)
+        style.configure("Treeview.Heading", background=palette["header"], foreground=fg)
+        style.map("Treeview", background=[("selected", palette["selection"])],
+                  foreground=[("selected", palette["selection_fg"])])
+        style.configure("Audit.Horizontal.TProgressbar", background=palette["button"],
+                        troughcolor=box_bg, bordercolor=box_bg,
+                        lightcolor=palette["button"], darkcolor=palette["button"])
+
+    configure_theme_styles()
 
     threat_items: list[dict[str, Any]] = []
     realtime_items: list[dict[str, Any]] = []
@@ -1332,6 +1392,22 @@ def launch_gui(
 
     days_var = tk.StringVar(value=str(default_days))
     output_var = tk.StringVar(value=str(resolve_output_dir(default_output)))
+    header = tk.Frame(root, bg=palette["header"], height=76, highlightthickness=0)
+    header.pack(fill="x")
+    header.pack_propagate(False)
+    logo_image = tk.PhotoImage(file=str(resource_path("pictures/icon_64x64.png")))
+    logo_label = tk.Label(header, image=logo_image, bg=palette["header"], borderwidth=0)
+    logo_label.pack(side="left", padx=(18, 6))
+    title_label = tk.Label(header, text="Scan System", bg=palette["header"], fg=fg,
+                           font=("Segoe UI", 24, "bold"))
+    title_label.pack(side="left", padx=(0, 20))
+    geometry = tk.Canvas(header, width=94, height=60, bg=palette["header"], highlightthickness=0)
+    geometry.pack(side="right", padx=18)
+    geometry_border = geometry.create_rectangle(1, 1, 93, 59, outline=hairline)
+    for coords in ((1, 1, 93, 59), (27, 1, 93, 49), (93, 1, 1, 59), (93, 27, 63, 59)):
+        geometry.create_line(*coords, fill=hairline, width=1)
+    divider = tk.Frame(root, bg=rule, height=6)
+    divider.pack(fill="x")
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -1371,7 +1447,8 @@ def launch_gui(
     audit_actions = ttk.Frame(tab_audit)
     audit_actions.pack(fill="x", pady=(10, 8))
 
-    audit_log = tk.Text(tab_audit, wrap="word", height=28)
+    audit_log = tk.Text(tab_audit, wrap="word", height=28, bg=box_bg, fg=fg,
+                        insertbackground=fg, highlightbackground=palette["border"])
     audit_log.pack(fill="both", expand=True)
 
     # Threats tab
@@ -1431,13 +1508,17 @@ def launch_gui(
     rt_scroll.pack(fill="y", side="right")
     rt_tree.configure(yscrollcommand=rt_scroll.set)
 
-    rt_anomalies = tk.Text(tab_realtime, wrap="word", height=7, bg=box_bg, fg=fg, insertbackground=fg)
+    rt_anomalies = tk.Text(tab_realtime, wrap="word", height=7, bg=box_bg, fg=fg,
+                           insertbackground=fg, highlightbackground=palette["border"])
     rt_anomalies.pack(fill="x", pady=(8, 0))
 
     # Reports tab
     rep_top = ttk.Frame(tab_reports)
     rep_top.pack(fill="x", pady=(0, 8))
-    report_list = tk.Listbox(tab_reports, height=25)
+    report_list = tk.Listbox(tab_reports, height=25, bg=box_bg, fg=fg,
+                             selectbackground=palette["selection"],
+                             selectforeground=palette["selection_fg"],
+                             highlightbackground=palette["border"])
     report_list.pack(fill="both", expand=True)
 
     rep_bottom = ttk.Frame(tab_reports)
@@ -1453,6 +1534,50 @@ def launch_gui(
     ttk.Label(status_frame, textvariable=theme_var).pack(side="left")
     ttk.Label(status_frame, textvariable=net_var).pack(side="right")
     ttk.Label(status_frame, textvariable=cpu_var).pack(side="right", padx=(0, 16))
+
+    def refresh_theme() -> None:
+        nonlocal current_theme, palette, bg, fg, box_bg, rule, hairline
+        new_theme = detect_windows_theme()
+        if new_theme != current_theme:
+            current_theme = new_theme
+            palette = UI_COLORS[current_theme]
+            bg = palette["bg"]
+            fg = palette["fg"]
+            box_bg = palette["surface"]
+            rule = palette["divider"]
+            hairline = palette["mark"]
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            configure_theme_styles()
+            set_titlebar_theme(root)
+            header.configure(bg=palette["header"])
+            logo_label.configure(bg=palette["header"])
+            title_label.configure(bg=palette["header"], fg=fg)
+            geometry.configure(bg=palette["header"])
+            geometry.itemconfigure(geometry_border, outline=hairline)
+            for item_id in geometry.find_all():
+                if item_id != geometry_border:
+                    geometry.itemconfigure(item_id, fill=hairline)
+            divider.configure(bg=rule)
+            for text_widget in (audit_log, rt_anomalies):
+                text_widget.configure(bg=box_bg, fg=fg, insertbackground=fg,
+                                      highlightbackground=palette["border"])
+            report_list.configure(bg=box_bg, fg=fg,
+                                  selectbackground=palette["selection"],
+                                  selectforeground=palette["selection_fg"],
+                                  highlightbackground=palette["border"])
+            for child in root.winfo_children():
+                if isinstance(child, tk.Toplevel):
+                    child.configure(bg=bg)
+                    set_titlebar_theme(child)
+                    for widget in child.winfo_children():
+                        if isinstance(widget, tk.Text):
+                            widget.configure(bg=box_bg, fg=fg, insertbackground=fg,
+                                             highlightbackground=palette["border"])
+            theme_var.set(f"Theme: {current_theme}")
+        root.after(1000, refresh_theme)
 
     def log_line(msg: str) -> None:
         audit_log.insert("end", msg + "\n")
@@ -1692,7 +1817,9 @@ def launch_gui(
                     detail_win = tk.Toplevel(root)
                     detail_win.title(f"Trace route {remote_ip}")
                     detail_win.geometry("900x500")
-                    text = tk.Text(detail_win, wrap="word", bg=box_bg, fg=fg, insertbackground=fg)
+                    detail_win.after_idle(lambda: set_titlebar_theme(detail_win))
+                    text = tk.Text(detail_win, wrap="word", bg=box_bg, fg=fg,
+                                   insertbackground=fg, highlightbackground=palette["border"])
                     text.pack(fill="both", expand=True)
                     text.insert("1.0", result.get("stdout", ""))
                     text.configure(state="disabled")
@@ -1800,7 +1927,9 @@ def launch_gui(
         detail_win = tk.Toplevel(root)
         detail_win.title("Details menaces Defender")
         detail_win.geometry("900x500")
-        text = tk.Text(detail_win, wrap="word")
+        detail_win.after_idle(lambda: set_titlebar_theme(detail_win))
+        text = tk.Text(detail_win, wrap="word", bg=box_bg, fg=fg,
+                       insertbackground=fg, highlightbackground=palette["border"])
         text.pack(fill="both", expand=True)
         text.insert("1.0", details)
         text.configure(state="disabled")
@@ -2075,6 +2204,8 @@ def launch_gui(
         log_line(f"[i] Derniers rapports: {last_json_report} | {last_txt_report}")
     root.protocol("WM_DELETE_WINDOW", on_root_close)
     root.bind("<Unmap>", on_window_unmap)
+    root.after_idle(lambda: set_titlebar_theme(root))
+    root.after(1000, refresh_theme)
     root.mainloop()
     return 0
 

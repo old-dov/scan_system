@@ -3,13 +3,16 @@
 
 #define MyAppName "Scan System"
 #ifndef MyAppVersion
-	#define MyAppVersion "1.0.0"
+	#define MyAppVersion "1.0.2"
 #endif
 #ifndef MyOutputSuffix
 	#define MyOutputSuffix ""
 #endif
 #define MyAppPublisher "Scan System"
 #define MyAppExeName "scan_system.exe"
+#ifndef MyDistDir
+  #define MyDistDir "dist"
+#endif
 #define MyAppId "5E7D1AF1-CC8D-4D8E-8AF8-2C2C4F6C0D50"
 
 [Setup]
@@ -24,7 +27,7 @@ OutputDir=installer_output
 OutputBaseFilename=ScanSystemSetup{#MyOutputSuffix}
 Compression=lzma
 SolidCompression=yes
-WizardStyle=modern
+WizardStyle=modern dynamic
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -40,7 +43,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Creer un raccourci sur le bureau"; GroupDescription: "Raccourcis:"; Flags: unchecked
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyDistDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Scan System"; Filename: "{app}\{#MyAppExeName}"
