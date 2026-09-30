@@ -3,7 +3,7 @@
 
 #define MyAppName "Scan System"
 #ifndef MyAppVersion
-	#define MyAppVersion "1.0.0"
+	#define MyAppVersion "1.0.2"
 #endif
 #ifndef MyOutputSuffix
 	#define MyOutputSuffix ""
