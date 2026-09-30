@@ -1,0 +1,41 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [rust-migration]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run tests
+        run: cargo test --workspace --locked
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build Rust binaries
+        run: cargo build --release --locked -p scan-system-gui -p scan-system-cli
+      - name: Install stable Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build Rust installer for testing
+        shell: pwsh
+        run: |
+          $iscc = @(
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'Stable Inno Setup 6 compiler not found' }
+          & .\build_release.ps1 -IsccPath $iscc -OutputSuffix '-ci'
+      - name: Keep installer as CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-system-rust-installer-ci
+          path: rust/installer_output/ScanSystemRustSetup-*-ci.exe
+          if-no-files-found: error

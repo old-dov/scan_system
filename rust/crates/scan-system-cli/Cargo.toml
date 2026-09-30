@@ -1,0 +1,11 @@
+[package]
+name = "scan-system-cli"
+description = "Command-line Windows audit for ScanSystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+scan-system-audit = { path = "../scan-system-audit" }
+scan-system-platform = { path = "../scan-system-platform" }

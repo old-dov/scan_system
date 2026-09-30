@@ -17,6 +17,8 @@ use serde_json::Value;
 use crate::process::{AuditHandle, ProcessError};
 
 /// Result of a Defender query that returns structured data on success.
+/// On invalid JSON, `data` holds the raw output as a string so the report can
+/// retain Python's `raw` field alongside the parse error.
 #[derive(Debug, Clone)]
 pub struct DefenderResult {
     pub ok: bool,
@@ -40,6 +42,14 @@ fn err(message: impl Into<String>) -> DefenderResult {
     }
 }
 
+fn err_raw(message: impl Into<String>, raw: String) -> DefenderResult {
+    DefenderResult {
+        ok: false,
+        data: Some(Value::String(raw)),
+        error: Some(message.into()),
+    }
+}
+
 /// `Get-MpComputerStatus`, the subset of fields the report cares about.
 ///
 /// # Errors
@@ -55,7 +65,7 @@ pub fn defender_status(handle: &AuditHandle) -> Result<DefenderResult, ProcessEr
     }
     Ok(match serde_json::from_str(&out.output) {
         Ok(value) => ok_json(value),
-        Err(_) => err("Sortie JSON Defender invalide"),
+        Err(_) => err_raw("Sortie JSON Defender invalide", out.output),
     })
 }
 
@@ -72,7 +82,7 @@ pub fn defender_status(handle: &AuditHandle) -> Result<DefenderResult, ProcessEr
 ///
 /// Only [`ProcessError::Cancelled`] propagates.
 pub fn defender_signature_update(handle: &AuditHandle) -> Result<DefenderResult, ProcessError> {
-    let script = "Update-MpSignature; Get-MpComputerStatus | Select AntivirusSignatureVersion,\
+    let script = "$ErrorActionPreference = 'Stop'; Update-MpSignature; Get-MpComputerStatus | Select AntivirusSignatureVersion,\
         AntivirusSignatureLastUpdated | ConvertTo-Json";
     let out = handle.run_powershell(script, Duration::from_secs(600))?;
     if !out.ok {
@@ -97,7 +107,10 @@ fn run_action(
     script: &str,
     timeout: Duration,
 ) -> Result<DefenderActionResult, ProcessError> {
-    let out = handle.run_powershell(script, timeout)?;
+    // A success marker after a non-terminating cmdlet error would otherwise
+    // reset PowerShell's process exit code to zero.
+    let guarded = format!("$ErrorActionPreference = 'Stop'; {script}");
+    let out = handle.run_powershell(&guarded, timeout)?;
     Ok(DefenderActionResult {
         ok: out.ok,
         output: out.output,
@@ -162,9 +175,9 @@ pub fn defender_remove_threats(handle: &AuditHandle) -> Result<DefenderActionRes
     )
 }
 
-/// `Get-MpThreatDetection`. A command failure or empty output is treated as "no
-/// threats", not an error (Defender's own behavior when nothing was ever detected) —
-/// only a genuinely malformed JSON body on an otherwise-successful call is an error.
+/// `Get-MpThreatDetection`. Empty successful output means no recorded threats;
+/// a command failure is retained as an error, since access denied is not an
+/// empty threat history.
 ///
 /// # Errors
 ///
@@ -174,13 +187,16 @@ pub fn defender_threat_detections(handle: &AuditHandle) -> Result<DefenderResult
         LastThreatStatusChangeTime,ThreatName,Resources,ActionSuccess,\
         CurrentThreatExecutionStatusID | ConvertTo-Json -Depth 6";
     let out = handle.run_powershell(script, Duration::from_secs(90))?;
-    if !out.ok || out.output.is_empty() {
+    if !out.ok {
+        return Ok(err(out.output));
+    }
+    if out.output.is_empty() {
         return Ok(ok_json(Value::Array(vec![])));
     }
     Ok(match serde_json::from_str::<Value>(&out.output) {
         Ok(Value::Array(items)) => ok_json(Value::Array(items)),
         Ok(single) => ok_json(Value::Array(vec![single])),
-        Err(_) => err("Sortie JSON menaces invalide"),
+        Err(_) => err_raw("Sortie JSON menaces invalide", out.output),
     })
 }
 
@@ -207,8 +223,9 @@ pub fn defender_targeted_scan(
     let mut scanned = Vec::with_capacity(paths.len());
     for path in paths {
         let escaped = path.replace('\'', "''");
-        let script =
-            format!("Start-MpScan -ScanType CustomScan -ScanPath '{escaped}' ; 'custom_scan_done'");
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; Start-MpScan -ScanType CustomScan -ScanPath '{escaped}'; 'custom_scan_done'"
+        );
         let out = handle.run_powershell(&script, Duration::from_secs(3600))?;
         let tail: String = out
             .output
@@ -274,4 +291,20 @@ fn join_env(var: &str, suffix: &str) -> String {
 
 fn dirs_home() -> Option<String> {
     env::var("USERPROFILE").ok().filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_does_not_report_success_after_powershell_error() {
+        let result = run_action(
+            &AuditHandle::new(),
+            "Write-Error 'simulated failure'; 'success_marker'",
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(!result.ok);
+    }
 }

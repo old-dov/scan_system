@@ -108,6 +108,7 @@ pub enum ProcessError {
     Cancelled,
     Timeout(Duration),
     Spawn(std::io::Error),
+    Command(String),
 }
 
 impl std::fmt::Display for ProcessError {
@@ -116,6 +117,7 @@ impl std::fmt::Display for ProcessError {
             Self::Cancelled => write!(f, "annule par l'utilisateur"),
             Self::Timeout(d) => write!(f, "timeout apres {}s", d.as_secs()),
             Self::Spawn(e) => write!(f, "echec du lancement du process: {e}"),
+            Self::Command(message) => write!(f, "commande echouee: {message}"),
         }
     }
 }

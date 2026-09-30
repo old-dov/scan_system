@@ -15,10 +15,10 @@ Python. Ce dossier `rust/` est une réécriture complète en Rust, en cours,
 
 ## Où on en est (vérifié dans le code, pas juste dans la mémoire)
 
-Branche git : `rust-migration` (locale, **pas encore pushée sur origin** —
-vérifie avant de supposer qu'elle existe côté remote).
+Branche git : `rust-migration` (suit actuellement `origin/rust-migration` ;
+vérifie son état avant de supposer que les modifications locales sont poussées).
 
-Deux crates livrées et testées :
+Crates livrées et testées :
 
 - `scan-system-core` (commit `55cf6ba`) : port 1:1 des fonctions pures
   (`suspicious_score`, `looks_suspicious_text`, `is_public_ipv4`,
@@ -35,21 +35,79 @@ Deux crates livrées et testées :
   (installs récents, événements de persistance récents, parsing de date
   d'install). Vérifié contre le vrai système (227 vraies entrées Uninstall,
   13 vraies entrées Run, vrai appel Defender).
+- `scan-system-sysmon` (travail local en cours, non commité) : port de la collecte
+  CPU/débit réseau et des connexions IPv4 publiques via `sysinfo` et `netstat2`,
+  avec instantanés d'audit et temps réel. Les clés de rapport Python sont
+  préservées. Tests du workspace, Clippy et formatage verts ; lecture réelle
+  Windows validée (43 connexions publiques observées au dernier essai). Les
+  contrôles de persistance du sondage temps réel sont intégrés à la GUI par
+  `RealtimePersistenceMonitor` (entrées startup et événements tâches/services).
+- `scan-system-audit` et `scan-system-cli` (travail local non commité) :
+  orchestration de `generate_report`, score, entrées Run et dossiers Startup,
+  hachage SHA-256, rapports JSON/TXT, cache des deux flux de menaces et CLI
+  `clap` avec `--days`, `--output` et les deux options de saut des scans.
+  Parcours d'audit local validé avec mises à jour et scans désactivés, puis
+  exécution CLI avec écriture JSON/TXT dans `rust/target/` : état Defender lu,
+  deux flux téléchargés, cache et rapports créés. L'exécution a montré 15
+  détections enregistrées par Defender et 0 correspondance des connexions
+  avec les flux ; l'ancien score élevé provenait donc de ces détections et
+  des événements de service, pas d'une correspondance réseau. Le 30 septembre,
+  un interpréteur a été retrouvé dans `.venv` et un audit comparé a été réalisé
+  sur le même poste avec `--skip-signature-update --skip-quick-scan` : même
+  score (95), mêmes raisons, mêmes nombres de détections Defender (25),
+  installations (7), services (10), entrées de démarrage (16) et entrées dans
+  les deux flux (1 + 632). Les chemins de champs JSON et les sections TXT
+  concordent. Les connexions publiques variaient de 10 à 9 entre deux relevés
+  successifs. Rapports dans `rust/target/parity-python` et
+  `rust/target/parity-rust-elevated`.
+  Après ce contrôle, le score a été corrigé dans Python et Rust : les
+  détections dont l'action Defender a réussi et dont l'exécution est bloquée
+  ou arrêtée restent dans l'historique sans ajouter de points. Le rapport du
+  30 septembre qui donnait 95 donne désormais 35 (7 installations récentes,
+  10 services). La CLI Rust a été relancée et confirme ce score ; les 25
+  détections restent présentes dans le JSON.
 
 ## Reste à faire (le plan complet en 4 phases)
 
 1. ~~`scan-system-core`~~ — FAIT.
-2. `scan-system-platform` (registre/Defender, FAIT ci-dessus) +
-   **`scan-system-sysmon`** (netstat2 + sysinfo, pas commencé) +
-   **`scan-system-audit`** (orchestration, équivalent de `generate_report()`,
-   pas commencé) + **`scan-system-cli`** (clap, pas commencé).
+2. `scan-system-platform`, `scan-system-sysmon`, `scan-system-audit` et
+   `scan-system-cli` sont présents. Un premier audit comparé Rust/Python sur
+   la même machine est validé, sans scan Defender. Restent la comparaison du
+   parcours complet et la validation des alertes de persistance sur le poste
+   avant de considérer la phase 2 comme achevée. Le format `/Date(...)/` émis
+   par `Get-WinEvent` sous Windows PowerShell 5.1 est désormais décodé dans
+   Python et Rust. Le 30 septembre, un test utilisateur de création d'entrée Run
+   temporaire a confirmé l'affichage « Nouvelle entree startup detectee » dans
+   Temps réel de la GUI Rust. Les rapports avant/après ont le même score 35 ;
+   le script avait supprimé l'entrée temporaire avant le second rapport.
 3. **`scan-system-gui`** — iced (architecture Elm) + `tray-icon`. Choix
-   assumé par l'utilisateur malgré un coût de portage plus élevé qu'egui,
-   pour une architecture d'état plus propre à terme. Pas commencé, la phase
-   la plus grosse/risquée du plan.
-4. **Packaging/release** — adapter `installer.iss`/`ci.yml`/`release.yml`
-   (actuellement pensés pour PyInstaller) vers `cargo build --release`. Pas
-   commencé.
+   assumé par l'utilisateur malgré un coût de portage plus élevé qu'egui.
+   Première interface locale compilée : quatre onglets, lancement et annulation
+   d'audit, lecture des menaces, moniteur temps réel persistant, rapports et
+   icône de notification avec ouverture/quitter. Les actions Defender manuelles
+   (nettoyage, scan complet, scan hors ligne) demandent confirmation avant
+   exécution. Le sondage de persistance et l'historique récent des alertes sont
+   présents. Le lancement avec Windows utilise une valeur Run distincte de
+   celle du Python et démarre l'interface réduite avec le monitoring actif.
+   L'envoi d'une notification Windows par l'icône de zone de notification est
+   codé, compilé et son affichage dans la barre des tâches a été confirmé par
+   l'utilisateur. Les autres parcours interactifs de l'interface restent à
+   vérifier.
+4. **Packaging/release** — `installer_rust.iss`, `rust/build_release.ps1` et
+   `rust-ci.yml` préparent une construction Rust séparée, sans toucher au
+   packaging Python. La compilation Inno Setup passe désormais sans avertissement
+   `HKCU` : l'installateur ne modifie plus directement les valeurs Run du profil.
+   La GUI migre l'ancienne entrée de démarrage dans la session de l'utilisateur
+   lorsque son chemin correspond exactement à l'exécutable installé. La migration
+   réelle depuis Python a été validée localement : installation Python 1.0.0,
+   entrée de démarrage `ScanSystemMonitor`, mise à jour par l'installateur Rust
+   Inno Setup 7.1.0 stable, puis premier lancement Rust qui a remplacé l'entrée
+   par `ScanSystemRustMonitor`. Un fichier témoin dans les données a été conservé.
+   La désinstallation silencieuse a retiré l'application et l'entrée Rust ; le
+   témoin temporaire a ensuite été supprimé. Le script de build
+   refuse le compilateur Inno Setup preview local ; la CI prépare un installateur
+   de test avec Inno Setup stable
+   comme artefact, sans publier de release. Aucun workflow Rust ne publie de release.
 
 ## Contraintes de compatibilité — ne pas casser
 

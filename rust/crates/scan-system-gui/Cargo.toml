@@ -1,0 +1,20 @@
+[package]
+name = "scan-system-gui"
+description = "iced desktop interface for the ScanSystem Rust migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "canvas", "image-without-codecs"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = { workspace = true }
+scan-system-core = { workspace = true }
+scan-system-audit = { path = "../scan-system-audit" }
+scan-system-platform = { path = "../scan-system-platform" }
+scan-system-sysmon = { path = "../scan-system-sysmon" }
+tray-icon = "0.25.1"
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+winres = "0.1.12"

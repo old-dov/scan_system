@@ -2,6 +2,8 @@
 //! `is_startup_monitoring_enabled`/`set_startup_monitoring_enabled`,
 //! `iter_uninstall_registry`, `startup_entries` in `scanner_windows.py`.
 
+use std::path::Path;
+
 use scan_system_core::StartupEntry;
 use winreg::{
     enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
@@ -28,18 +30,29 @@ pub fn detect_windows_theme() -> &'static str {
 
 const STARTUP_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_VALUE_NAME: &str = "ScanSystemMonitor";
+const RUST_STARTUP_VALUE_NAME: &str = "ScanSystemRustMonitor";
+
+fn startup_value_enabled(value_name: &str) -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let read = || -> std::io::Result<String> {
+        let key = hkcu.open_subkey(STARTUP_RUN_KEY)?;
+        key.get_value(value_name)
+    };
+    read().is_ok_and(|value| value.contains("--monitoring-enabled"))
+}
 
 /// `true` if the `HKCU\...\Run\ScanSystemMonitor` value exists and its command line
 /// still carries `--monitoring-enabled` (a stale value from an older exe path is still
 /// "enabled" by this check, matching the Python original's plain substring test).
 #[must_use]
 pub fn is_startup_monitoring_enabled() -> bool {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let read = || -> std::io::Result<String> {
-        let key = hkcu.open_subkey(STARTUP_RUN_KEY)?;
-        key.get_value(STARTUP_VALUE_NAME)
-    };
-    read().is_ok_and(|value| value.contains("--monitoring-enabled"))
+    startup_value_enabled(STARTUP_VALUE_NAME)
+}
+
+/// Checks only Rust's own startup value, leaving the Python value untouched.
+#[must_use]
+pub fn is_rust_startup_monitoring_enabled() -> bool {
+    startup_value_enabled(RUST_STARTUP_VALUE_NAME)
 }
 
 /// Sets or clears the startup-monitoring `Run` value. `command` is the full command
@@ -53,19 +66,102 @@ pub fn is_startup_monitoring_enabled() -> bool {
 /// The registry error message, when the `Run` key can't be opened for writing (e.g. a
 /// locked-down machine) or the value can't be set/deleted.
 pub fn set_startup_monitoring_enabled(enabled: bool, command: &str) -> Result<(), String> {
+    set_startup_value(STARTUP_VALUE_NAME, enabled, command)
+}
+
+/// Enables or disables the Rust GUI at login without changing Python's entry.
+///
+/// # Errors
+///
+/// Returns the registry error if the value cannot be changed.
+pub fn set_rust_startup_monitoring_enabled(enabled: bool, command: &str) -> Result<(), String> {
+    set_startup_value(RUST_STARTUP_VALUE_NAME, enabled, command)
+}
+
+fn legacy_command_targets_exe(command: &str, exe: &Path) -> bool {
+    let Some((path, args)) = command
+        .trim()
+        .strip_prefix('"')
+        .and_then(|s| s.split_once('"'))
+    else {
+        return false;
+    };
+    path.eq_ignore_ascii_case(&exe.to_string_lossy())
+        && args
+            .split_whitespace()
+            .any(|arg| arg == "--monitoring-enabled")
+}
+
+/// Transfer the Python monitor's Run value to the Rust GUI when both point to
+/// the same installed executable. This runs in the interactive user's process,
+/// where HKCU refers to the right profile, rather than in an elevated installer.
+/// Portable builds with a different path leave the installed Python entry alone.
+///
+/// # Errors
+///
+/// Returns a registry error without deleting the legacy value if the replacement
+/// cannot be written.
+pub fn migrate_legacy_startup_monitoring(exe: &Path) -> Result<bool, String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(key) = hkcu.open_subkey_with_flags(
+        STARTUP_RUN_KEY,
+        winreg::enums::KEY_QUERY_VALUE | winreg::enums::KEY_SET_VALUE,
+    ) else {
+        return Ok(false);
+    };
+    let Ok(legacy_command) = key.get_value::<String, _>(STARTUP_VALUE_NAME) else {
+        return Ok(false);
+    };
+    if !legacy_command_targets_exe(&legacy_command, exe) {
+        return Ok(false);
+    }
+    let command = format!(
+        "\"{}\" --monitoring-enabled --start-minimized",
+        exe.display()
+    );
+    key.set_value(RUST_STARTUP_VALUE_NAME, &command)
+        .map_err(|error| error.to_string())?;
+    key.delete_value(STARTUP_VALUE_NAME)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn set_startup_value(value_name: &str, enabled: bool, command: &str) -> Result<(), String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu
         .open_subkey_with_flags(STARTUP_RUN_KEY, winreg::enums::KEY_SET_VALUE)
         .map_err(|e| e.to_string())?;
     if enabled {
-        key.set_value(STARTUP_VALUE_NAME, &command)
+        key.set_value(value_name, &command)
             .map_err(|e| e.to_string())
     } else {
         // Deleting a value that isn't there is not an error (matches the Python
         // original's bare `except OSError: pass`).
-        match key.delete_value(STARTUP_VALUE_NAME) {
+        match key.delete_value(value_name) {
             Ok(()) | Err(_) => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_startup_migration_requires_same_installed_exe_and_monitor_flag() {
+        let exe = Path::new(r"C:\Program Files\Scan System\scan_system.exe");
+        assert!(legacy_command_targets_exe(
+            r#""c:\program files\scan system\scan_system.exe" --gui --monitoring-enabled --start-minimized"#,
+            exe,
+        ));
+        assert!(!legacy_command_targets_exe(
+            r#""D:\portable\scan_system.exe" --gui --monitoring-enabled"#,
+            exe,
+        ));
+        assert!(!legacy_command_targets_exe(
+            r#""C:\Program Files\Scan System\scan_system.exe" --gui"#,
+            exe,
+        ));
     }
 }
 

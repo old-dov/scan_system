@@ -11,7 +11,11 @@ use serde::Deserialize;
 pub fn is_public_ipv4(value: &str) -> bool {
     match value.parse::<IpAddr>() {
         Ok(IpAddr::V4(v4)) => {
-            !(v4.is_private() || v4.is_loopback() || v4.is_multicast() || v4.is_link_local())
+            !(v4.is_unspecified()
+                || v4.is_private()
+                || v4.is_loopback()
+                || v4.is_multicast()
+                || v4.is_link_local())
         }
         _ => false,
     }
@@ -94,6 +98,7 @@ mod tests {
         assert!(!is_public_ipv4("127.0.0.1"));
         assert!(!is_public_ipv4("224.0.0.1"));
         assert!(!is_public_ipv4("169.254.1.1"));
+        assert!(!is_public_ipv4("0.0.0.0"));
     }
 
     #[test]

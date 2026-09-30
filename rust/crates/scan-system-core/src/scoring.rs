@@ -40,7 +40,7 @@ pub fn suspicious_score(inputs: &ScoreInputs) -> ScoreResult {
     let threats = inputs.defender_threats_count;
     if threats > 0 {
         score += (20 * threats as i64).min(60);
-        reasons.push(format!("Menaces Defender detectees: {threats}"));
+        reasons.push(format!("Detections Defender a verifier: {threats}"));
     }
 
     let installs = inputs.recent_installs_count;
@@ -119,7 +119,7 @@ mod tests {
     fn suspicious_score_defender_threats_capped_at_60() {
         let result = suspicious_score(&with_counts(5, 0, 0, 0));
         assert_eq!(result.risk_score_100, 60);
-        assert!(result.reasons[0].contains("Menaces Defender detectees: 5"));
+        assert!(result.reasons[0].contains("Detections Defender a verifier: 5"));
     }
 
     #[test]

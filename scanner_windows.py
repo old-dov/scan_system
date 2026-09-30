@@ -252,6 +252,25 @@ def detect_windows_theme() -> str:
         return "light"
 
 
+# Keep the desktop colors in step with OSINTBox's light and dark card themes.
+UI_COLORS = {
+    "light": {
+        "bg": "#fafaf9", "fg": "#101010", "surface": "#ffffff",
+        "header": "#ffffff", "divider": "#303030", "border": "#dedfdf",
+        "mark": "#e3e4e4", "button": "#303030", "button_hover": "#101010",
+        "button_disabled": "#ebebea", "disabled_fg": "#777777",
+        "selection": "#303030", "selection_fg": "#ffffff",
+    },
+    "dark": {
+        "bg": "#171b20", "fg": "#edf0f3", "surface": "#232a32",
+        "header": "#222830", "divider": "#52606e", "border": "#4a5561",
+        "mark": "#657483", "button": "#46596b", "button_hover": "#587087",
+        "button_disabled": "#303740", "disabled_fg": "#a0aab4",
+        "selection": "#769cbd", "selection_fg": "#10161c",
+    },
+}
+
+
 def format_rate(bytes_per_sec: float) -> str:
     bits = max(0.0, bytes_per_sec * 8.0)
     if bits >= 1_000_000_000:
@@ -279,6 +298,15 @@ def parse_any_datetime(raw: Any) -> dt.datetime | None:
     text = str(raw).strip()
     if not text:
         return None
+    # Windows PowerShell 5.1 ConvertTo-Json serializes Get-WinEvent dates this way.
+    # The number is UTC milliseconds; compare it as local naive time like the
+    # other event timestamps and the realtime monitor's local cutoff.
+    powershell_date = re.fullmatch(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/", text)
+    if powershell_date:
+        try:
+            return dt.datetime.fromtimestamp(int(powershell_date.group(1)) / 1000)
+        except (OverflowError, OSError, ValueError):
+            return None
     text = text.replace("Z", "+00:00")
     try:
         return dt.datetime.fromisoformat(text)
@@ -429,7 +457,11 @@ def collect_realtime_snapshot(previous: dict[str, Any]) -> dict[str, Any]:
         # Fenetre resserree a la cadence de sondage (+marge) plutot que 24h a chaque passage :
         # cf. _event_log_start_expr, gain direct sur le cout CPU de chaque Get-WinEvent.
         since = dt.datetime.now() - dt.timedelta(seconds=90)
-        task_events, service_events = recent_persistence_events(1, since=since)
+        try:
+            task_events, service_events = recent_persistence_events(1, since=since)
+        except RuntimeError as exc:
+            snapshot["anomalies"].append(f"Lecture persistance echouee: {exc}")
+            task_events, service_events = [], []
 
         seen_tasks = previous.get("seen_tasks")
         seen_services = previous.get("seen_services")
@@ -639,7 +671,7 @@ def common_scan_paths() -> list[str]:
 def defender_targeted_scan(paths: list[str]) -> dict[str, Any]:
     scanned: list[dict[str, Any]] = []
     for path in paths:
-        ok, out = run_powershell(f"Start-MpScan -ScanType CustomScan -ScanPath '{path.replace("'", "''")}' ; 'custom_scan_done'", timeout=3600)
+        ok, out = run_powershell(f"$ErrorActionPreference = 'Stop'; Start-MpScan -ScanType CustomScan -ScanPath '{path.replace("'", "''")}'; 'custom_scan_done'", timeout=3600)
         scanned.append({"path": path, "ok": ok, "result": out[-1000:] if out else ""})
     return {"ok": all(item["ok"] for item in scanned) if scanned else True, "paths": scanned}
 
@@ -688,7 +720,7 @@ def defender_status() -> dict[str, Any]:
 
 
 def defender_signature_update() -> dict[str, Any]:
-    ps = "Update-MpSignature; Get-MpComputerStatus | Select AntivirusSignatureVersion,AntivirusSignatureLastUpdated | ConvertTo-Json"
+    ps = "$ErrorActionPreference = 'Stop'; Update-MpSignature; Get-MpComputerStatus | Select AntivirusSignatureVersion,AntivirusSignatureLastUpdated | ConvertTo-Json"
     ok, out = run_powershell(ps, timeout=600)
     if not ok:
         return {"ok": False, "error": out}
@@ -700,7 +732,7 @@ def defender_signature_update() -> dict[str, Any]:
 
 def defender_quick_scan() -> dict[str, Any]:
     # QuickScan est bloquant dans la plupart des cas, mais le delai depend de la machine.
-    ps = "Start-MpScan -ScanType QuickScan; 'quick_scan_done'"
+    ps = "$ErrorActionPreference = 'Stop'; Start-MpScan -ScanType QuickScan; 'quick_scan_done'"
     ok, out = run_powershell(ps, timeout=3600)
     if not ok:
         return {"ok": False, "error": out}
@@ -715,8 +747,7 @@ def defender_threat_detections() -> dict[str, Any]:
     )
     ok, out = run_powershell(ps, timeout=90)
     if not ok:
-        # Pas de menace peut retourner une sortie vide selon config.
-        return {"ok": True, "data": []}
+        return {"ok": False, "error": out}
 
     if not out:
         return {"ok": True, "data": []}
@@ -731,21 +762,21 @@ def defender_threat_detections() -> dict[str, Any]:
 
 
 def defender_remove_threats() -> dict[str, Any]:
-    ok, out = run_powershell("Remove-MpThreat; 'threat_cleanup_done'", timeout=1800)
+    ok, out = run_powershell("$ErrorActionPreference = 'Stop'; Remove-MpThreat; 'threat_cleanup_done'", timeout=1800)
     if not ok:
         return {"ok": False, "error": out}
     return {"ok": True, "result": out}
 
 
 def defender_full_scan() -> dict[str, Any]:
-    ok, out = run_powershell("Start-MpScan -ScanType FullScan; 'full_scan_done'", timeout=7200)
+    ok, out = run_powershell("$ErrorActionPreference = 'Stop'; Start-MpScan -ScanType FullScan; 'full_scan_done'", timeout=7200)
     if not ok:
         return {"ok": False, "error": out}
     return {"ok": True, "result": out}
 
 
 def defender_offline_scan() -> dict[str, Any]:
-    ok, out = run_powershell("Start-MpWDOScan; 'offline_scan_requested'", timeout=300)
+    ok, out = run_powershell("$ErrorActionPreference = 'Stop'; Start-MpWDOScan; 'offline_scan_requested'", timeout=300)
     if not ok:
         return {"ok": False, "error": out}
     return {"ok": True, "result": out}
@@ -834,7 +865,11 @@ def refresh_threat_feeds_cache(output_dir: Path) -> dict[str, Any]:
     return result
 
 
-def recent_installs(days: int) -> list[dict[str, Any]]:
+def recent_installs(days: int, status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if status is None:
+        status = {}
+    status.clear()
+    status["ok"] = True
     cutoff = dt.datetime.now() - dt.timedelta(days=days)
     out: list[dict[str, Any]] = []
 
@@ -848,33 +883,44 @@ def recent_installs(days: int) -> list[dict[str, Any]]:
     # Fallback via event log MSI pour detecter certains installs sans InstallDate registre.
     ps = textwrap.dedent(
         f"""
-        Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='MsiInstaller'; Id=11707; StartTime=(Get-Date).AddDays(-{days})}} |
-        Select-Object TimeCreated, Id, LevelDisplayName, Message |
-        ConvertTo-Json -Depth 4
+        try {{
+            $events = @(Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='MsiInstaller'; Id=11707; StartTime=(Get-Date).AddDays(-{days})}} -ErrorAction Stop |
+                Select-Object TimeCreated, Id, LevelDisplayName, Message)
+        }} catch {{
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {{ throw }}
+            $events = @()
+        }}
+        ConvertTo-Json -InputObject $events -Depth 4
         """
     ).strip()
     ok, raw = run_powershell(ps, timeout=120)
-    if ok and raw:
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                data = [data]
-            for item in data:
-                out.append(
-                    {
-                        "display_name": "(MSI event)",
-                        "display_version": "",
-                        "publisher": "",
-                        "install_date": str(item.get("TimeCreated", "")),
-                        "install_location": "",
-                        "uninstall_string": "",
-                        "event_id": item.get("Id"),
-                        "event_message": str(item.get("Message", ""))[:1200],
-                        "registry_subkey": "",
-                    }
-                )
-        except json.JSONDecodeError:
-            pass
+    if not ok:
+        status.update(ok=False, error=raw)
+        return out
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        status.update(ok=False, error=f"JSON MSI invalide: {exc}")
+        return out
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        status.update(ok=False, error="JSON MSI invalide")
+        return out
+    for item in data:
+        out.append(
+            {
+                "display_name": "(MSI event)",
+                "display_version": "",
+                "publisher": "",
+                "install_date": str(item.get("TimeCreated", "")),
+                "install_location": "",
+                "uninstall_string": "",
+                "event_id": item.get("Id"),
+                "event_message": str(item.get("Message", ""))[:1200],
+                "registry_subkey": "",
+            }
+        )
 
     return out
 
@@ -950,24 +996,38 @@ def recent_persistence_events(
     start_expr = _event_log_start_expr(days, since)
     ps = textwrap.dedent(
         f"""
-        $tasks = @(Get-WinEvent -FilterHashtable @{{
-            LogName='Microsoft-Windows-TaskScheduler/Operational'; Id=106; StartTime={start_expr}
-        }} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message)
-        $services = @(Get-WinEvent -FilterHashtable @{{
-            LogName='System'; Id=7045; StartTime={start_expr}
-        }} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, ProviderName, Message)
+        try {{
+            $tasks = @(Get-WinEvent -FilterHashtable @{{
+                LogName='Microsoft-Windows-TaskScheduler/Operational'; Id=106; StartTime={start_expr}
+            }} -ErrorAction Stop | Select-Object TimeCreated, Id, Message)
+        }} catch {{
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {{ throw }}
+            $tasks = @()
+        }}
+        try {{
+            $services = @(Get-WinEvent -FilterHashtable @{{
+                LogName='System'; Id=7045; StartTime={start_expr}
+            }} -ErrorAction Stop | Select-Object TimeCreated, Id, ProviderName, Message)
+        }} catch {{
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {{ throw }}
+            $services = @()
+        }}
         [PSCustomObject]@{{ tasks = $tasks; services = $services }} | ConvertTo-Json -Depth 4
         """
     ).strip()
     ok, out = run_powershell(ps, timeout=120)
     if not ok or not out:
-        return [], []
+        raise RuntimeError(f"Collecte journaux Windows echouee: {out}")
     try:
         data = json.loads(out)
-    except json.JSONDecodeError:
-        return [], []
-    tasks = data.get("tasks") or []
-    services = data.get("services") or []
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"JSON evenements invalide: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Objet taches/services absent")
+    tasks = data.get("tasks")
+    services = data.get("services")
+    if not isinstance(tasks, (dict, list)) or not isinstance(services, (dict, list)):
+        raise RuntimeError("Listes taches/services invalides")
     if isinstance(tasks, dict):
         tasks = [tasks]
     if isinstance(services, dict):
@@ -975,14 +1035,28 @@ def recent_persistence_events(
     return tasks, services
 
 
+def defender_detection_needs_attention(item: dict[str, Any]) -> bool:
+    """Conserver le doute sauf si Defender confirme nettoyage et arrêt/blocage."""
+    return not (
+        item.get("ActionSuccess") is True
+        and item.get("CurrentThreatExecutionStatusID") in (1, 4)
+    )
+
+
 def suspicious_score(report: dict[str, Any]) -> dict[str, Any]:
     score = 0
     reasons: list[str] = []
 
-    threats = report.get("defender_threat_detections", {}).get("data", [])
+    # Get-MpThreatDetection includes past detections. A successful cleaning
+    # action plus a blocked/not-executing status is evidence this record was
+    # handled; keep it in the report, but do not score it as a current signal.
+    threats = [
+        item for item in report.get("defender_threat_detections", {}).get("data", [])
+        if defender_detection_needs_attention(item)
+    ]
     if threats:
         score += min(60, 20 * len(threats))
-        reasons.append(f"Menaces Defender detectees: {len(threats)}")
+        reasons.append(f"Detections Defender a verifier: {len(threats)}")
 
     installs = report.get("recent_installs", [])
     if len(installs) >= 6:
@@ -1022,6 +1096,26 @@ def suspicious_score(report: dict[str, Any]) -> dict[str, Any]:
     return {"risk_score_100": score, "reasons": reasons}
 
 
+def audit_is_complete(report: dict[str, Any]) -> bool:
+    """Ne pas présenter un score partiel comme un audit complet."""
+    if (report.get("persistence_collection", {}).get("ok") is False
+            or report.get("recent_installs_collection", {}).get("ok") is False):
+        return False
+    if not report.get("defender_status", {}).get("ok"):
+        return False
+    if not report.get("defender_threat_detections", {}).get("ok"):
+        return False
+    params = report.get("parameters", {})
+    if params.get("update_signatures") and not report.get("defender_signature_update", {}).get("ok"):
+        return False
+    if params.get("run_quick_scan") and (
+        not report.get("defender_quick_scan", {}).get("ok")
+        or not report.get("defender_targeted_scan", {}).get("ok")
+    ):
+        return False
+    return all(feed.get("ok") for feed in report.get("threat_feeds_refresh", {}).get("feeds", []))
+
+
 def write_txt_report(path: Path, report: dict[str, Any]) -> None:
     lines: list[str] = []
     lines.append("=== RAPPORT SCAN SECURITE WINDOWS ===")
@@ -1051,21 +1145,21 @@ def write_txt_report(path: Path, report: dict[str, Any]) -> None:
         pub = app.get("publisher", "")
         lines.append(f"{i}. {name} | {date} | {pub}")
     if not report.get("recent_installs"):
-        lines.append("Aucune installation recente detectee")
+        lines.append("Collecte incomplete" if report.get("recent_installs_collection", {}).get("ok") is False else "Aucune installation recente detectee")
     lines.append("")
 
     lines.append("[Services installes recemment]")
     for e in report.get("recent_service_installs", []):
         lines.append(f"- {e.get('TimeCreated')} | ID={e.get('Id')} | {str(e.get('Message', ''))[:200]}")
     if not report.get("recent_service_installs"):
-        lines.append("Aucun")
+        lines.append("Collecte incomplete" if report.get("persistence_collection", {}).get("ok") is False else "Aucun")
     lines.append("")
 
     lines.append("[Taches planifiees enregistrees recemment]")
     for e in report.get("recent_task_registrations", []):
         lines.append(f"- {e.get('TimeCreated')} | ID={e.get('Id')} | {str(e.get('Message', ''))[:200]}")
     if not report.get("recent_task_registrations"):
-        lines.append("Aucune")
+        lines.append("Collecte incomplete" if report.get("persistence_collection", {}).get("ok") is False else "Aucune")
     lines.append("")
 
     lines.append("[Startup entries]")
@@ -1155,9 +1249,16 @@ def generate_report(
     step("Menaces detectees...", 80)
     report["defender_threat_detections"] = defender_threat_detections()
     step("Installations recentes...", 83)
-    report["recent_installs"] = recent_installs(days)
+    installs_status: dict[str, Any] = {}
+    report["recent_installs"] = recent_installs(days, installs_status)
+    report["recent_installs_collection"] = installs_status
     step("Services et taches recents...", 87)
-    task_events, service_events = recent_persistence_events(days)
+    try:
+        task_events, service_events = recent_persistence_events(days)
+        report["persistence_collection"] = {"ok": True}
+    except RuntimeError as exc:
+        task_events, service_events = [], []
+        report["persistence_collection"] = {"ok": False, "error": str(exc)}
     report["recent_service_installs"] = service_events
     report["recent_task_registrations"] = task_events
     step("Mise a jour des flux de menaces...", 92)
@@ -1276,27 +1377,68 @@ def launch_gui(
 
     style = ttk.Style()
     current_theme = detect_windows_theme()
+    palette = UI_COLORS[current_theme]
     try:
-        style.theme_use("vista" if current_theme == "light" else "clam")
+        style.theme_use("clam")
     except Exception:
         pass
-    bg = "#f3f3f3" if current_theme == "light" else "#1f1f1f"
-    fg = "#111111" if current_theme == "light" else "#f2f2f2"
-    box_bg = "#ffffff" if current_theme == "light" else "#2b2b2b"
-    root.configure(bg=bg)
-    style.configure("TFrame", background=bg)
-    style.configure("TLabel", background=bg, foreground=fg)
-    style.configure("TNotebook", background=bg)
-    style.configure("TNotebook.Tab", padding=(10, 4))
-    style.configure("TButton", padding=(8, 4))
-    style.configure(
-        "Audit.Horizontal.TProgressbar",
-        background="#2ecc71",
-        troughcolor=box_bg,
-        bordercolor=box_bg,
-        lightcolor="#2ecc71",
-        darkcolor="#2ecc71",
-    )
+    bg = palette["bg"]
+    fg = palette["fg"]
+    box_bg = palette["surface"]
+    rule = palette["divider"]
+    hairline = palette["mark"]
+
+    def set_titlebar_theme(window: tk.Misc) -> None:
+        if platform.system().lower() != "windows":
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            user32.GetParent.argtypes = [ctypes.c_void_p]
+            user32.GetParent.restype = ctypes.c_void_p
+            client_hwnd = window.winfo_id()
+            hwnd = user32.GetParent(client_hwnd) or client_hwnd
+            enabled = ctypes.c_int(current_theme == "dark")
+            dwm_set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            dwm_set_attribute.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                          ctypes.c_void_p, ctypes.c_uint]
+            dwm_set_attribute(
+                hwnd, 20, ctypes.byref(enabled), ctypes.sizeof(enabled)
+            )
+        except (AttributeError, OSError, tk.TclError):
+            pass
+
+    def configure_theme_styles() -> None:
+        root.configure(bg=bg)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TNotebook", background=bg, bordercolor=palette["border"],
+                        relief="flat")
+        style.configure("TNotebook.Tab", background=palette["header"], foreground=fg,
+                        bordercolor=palette["border"], padding=(10, 4), relief="flat")
+        style.map("TNotebook.Tab", background=[("selected", palette["button"]),
+                                                ("active", palette["button_hover"])],
+                  foreground=[("selected", "#ffffff"), ("active", "#ffffff")])
+        style.configure("TButton", background=palette["button"], foreground="#ffffff",
+                        bordercolor=palette["border"], padding=(8, 4), relief="flat")
+        style.map("TButton", background=[("disabled", palette["button_disabled"]),
+                                          ("active", palette["button_hover"])],
+                  foreground=[("disabled", palette["disabled_fg"])])
+        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure("TEntry", fieldbackground=box_bg, foreground=fg,
+                        bordercolor=palette["border"], insertcolor=fg)
+        style.configure("Vertical.TScrollbar", background=palette["divider"],
+                        troughcolor=box_bg, bordercolor=palette["border"])
+        style.configure("Treeview", background=box_bg, fieldbackground=box_bg, foreground=fg)
+        style.configure("Treeview.Heading", background=palette["header"], foreground=fg)
+        style.map("Treeview", background=[("selected", palette["selection"])],
+                  foreground=[("selected", palette["selection_fg"])])
+        style.configure("Audit.Horizontal.TProgressbar", background=palette["button"],
+                        troughcolor=box_bg, bordercolor=box_bg,
+                        lightcolor=palette["button"], darkcolor=palette["button"])
+
+    configure_theme_styles()
 
     threat_items: list[dict[str, Any]] = []
     realtime_items: list[dict[str, Any]] = []
@@ -1332,6 +1474,22 @@ def launch_gui(
 
     days_var = tk.StringVar(value=str(default_days))
     output_var = tk.StringVar(value=str(resolve_output_dir(default_output)))
+    header = tk.Frame(root, bg=palette["header"], height=76, highlightthickness=0)
+    header.pack(fill="x")
+    header.pack_propagate(False)
+    logo_image = tk.PhotoImage(file=str(resource_path("pictures/icon_64x64.png")))
+    logo_label = tk.Label(header, image=logo_image, bg=palette["header"], borderwidth=0)
+    logo_label.pack(side="left", padx=(18, 6))
+    title_label = tk.Label(header, text="Scan System", bg=palette["header"], fg=fg,
+                           font=("Segoe UI", 24, "bold"))
+    title_label.pack(side="left", padx=(0, 20))
+    geometry = tk.Canvas(header, width=94, height=60, bg=palette["header"], highlightthickness=0)
+    geometry.pack(side="right", padx=18)
+    geometry_border = geometry.create_rectangle(1, 1, 93, 59, outline=hairline)
+    for coords in ((1, 1, 93, 59), (27, 1, 93, 49), (93, 1, 1, 59), (93, 27, 63, 59)):
+        geometry.create_line(*coords, fill=hairline, width=1)
+    divider = tk.Frame(root, bg=rule, height=6)
+    divider.pack(fill="x")
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -1371,7 +1529,8 @@ def launch_gui(
     audit_actions = ttk.Frame(tab_audit)
     audit_actions.pack(fill="x", pady=(10, 8))
 
-    audit_log = tk.Text(tab_audit, wrap="word", height=28)
+    audit_log = tk.Text(tab_audit, wrap="word", height=28, bg=box_bg, fg=fg,
+                        insertbackground=fg, highlightbackground=palette["border"])
     audit_log.pack(fill="both", expand=True)
 
     # Threats tab
@@ -1431,13 +1590,17 @@ def launch_gui(
     rt_scroll.pack(fill="y", side="right")
     rt_tree.configure(yscrollcommand=rt_scroll.set)
 
-    rt_anomalies = tk.Text(tab_realtime, wrap="word", height=7, bg=box_bg, fg=fg, insertbackground=fg)
+    rt_anomalies = tk.Text(tab_realtime, wrap="word", height=7, bg=box_bg, fg=fg,
+                           insertbackground=fg, highlightbackground=palette["border"])
     rt_anomalies.pack(fill="x", pady=(8, 0))
 
     # Reports tab
     rep_top = ttk.Frame(tab_reports)
     rep_top.pack(fill="x", pady=(0, 8))
-    report_list = tk.Listbox(tab_reports, height=25)
+    report_list = tk.Listbox(tab_reports, height=25, bg=box_bg, fg=fg,
+                             selectbackground=palette["selection"],
+                             selectforeground=palette["selection_fg"],
+                             highlightbackground=palette["border"])
     report_list.pack(fill="both", expand=True)
 
     rep_bottom = ttk.Frame(tab_reports)
@@ -1453,6 +1616,50 @@ def launch_gui(
     ttk.Label(status_frame, textvariable=theme_var).pack(side="left")
     ttk.Label(status_frame, textvariable=net_var).pack(side="right")
     ttk.Label(status_frame, textvariable=cpu_var).pack(side="right", padx=(0, 16))
+
+    def refresh_theme() -> None:
+        nonlocal current_theme, palette, bg, fg, box_bg, rule, hairline
+        new_theme = detect_windows_theme()
+        if new_theme != current_theme:
+            current_theme = new_theme
+            palette = UI_COLORS[current_theme]
+            bg = palette["bg"]
+            fg = palette["fg"]
+            box_bg = palette["surface"]
+            rule = palette["divider"]
+            hairline = palette["mark"]
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            configure_theme_styles()
+            set_titlebar_theme(root)
+            header.configure(bg=palette["header"])
+            logo_label.configure(bg=palette["header"])
+            title_label.configure(bg=palette["header"], fg=fg)
+            geometry.configure(bg=palette["header"])
+            geometry.itemconfigure(geometry_border, outline=hairline)
+            for item_id in geometry.find_all():
+                if item_id != geometry_border:
+                    geometry.itemconfigure(item_id, fill=hairline)
+            divider.configure(bg=rule)
+            for text_widget in (audit_log, rt_anomalies):
+                text_widget.configure(bg=box_bg, fg=fg, insertbackground=fg,
+                                      highlightbackground=palette["border"])
+            report_list.configure(bg=box_bg, fg=fg,
+                                  selectbackground=palette["selection"],
+                                  selectforeground=palette["selection_fg"],
+                                  highlightbackground=palette["border"])
+            for child in root.winfo_children():
+                if isinstance(child, tk.Toplevel):
+                    child.configure(bg=bg)
+                    set_titlebar_theme(child)
+                    for widget in child.winfo_children():
+                        if isinstance(widget, tk.Text):
+                            widget.configure(bg=box_bg, fg=fg, insertbackground=fg,
+                                             highlightbackground=palette["border"])
+            theme_var.set(f"Theme: {current_theme}")
+        root.after(1000, refresh_theme)
 
     def log_line(msg: str) -> None:
         audit_log.insert("end", msg + "\n")
@@ -1692,7 +1899,9 @@ def launch_gui(
                     detail_win = tk.Toplevel(root)
                     detail_win.title(f"Trace route {remote_ip}")
                     detail_win.geometry("900x500")
-                    text = tk.Text(detail_win, wrap="word", bg=box_bg, fg=fg, insertbackground=fg)
+                    detail_win.after_idle(lambda: set_titlebar_theme(detail_win))
+                    text = tk.Text(detail_win, wrap="word", bg=box_bg, fg=fg,
+                                   insertbackground=fg, highlightbackground=palette["border"])
                     text.pack(fill="both", expand=True)
                     text.insert("1.0", result.get("stdout", ""))
                     text.configure(state="disabled")
@@ -1800,7 +2009,9 @@ def launch_gui(
         detail_win = tk.Toplevel(root)
         detail_win.title("Details menaces Defender")
         detail_win.geometry("900x500")
-        text = tk.Text(detail_win, wrap="word")
+        detail_win.after_idle(lambda: set_titlebar_theme(detail_win))
+        text = tk.Text(detail_win, wrap="word", bg=box_bg, fg=fg,
+                       insertbackground=fg, highlightbackground=palette["border"])
         text.pack(fill="both", expand=True)
         text.insert("1.0", details)
         text.configure(state="disabled")
@@ -1830,9 +2041,8 @@ def launch_gui(
         threat_status_var.set(label)
 
     def cleanup_defender_threats() -> None:
-        items = selected_threat_items()
-        if not items and not threat_items:
-            messagebox.showinfo("Information", "Aucune menace Defender detectee pour le moment.")
+        if not any(defender_detection_needs_attention(item) for item in threat_items):
+            messagebox.showinfo("Information", "Aucune detection non resolue a nettoyer.")
             return
 
         prompt = (
@@ -1973,6 +2183,7 @@ def launch_gui(
                 last_json_report = str(jpath)
                 last_txt_report = str(tpath)
                 risk = report.get("risk", {}).get("risk_score_100", 0)
+                complete = audit_is_complete(report)
                 tr = report.get("threat_feeds_refresh", {}).get("feeds", [])
                 ok_count = sum(1 for f in tr if f.get("ok"))
 
@@ -1984,7 +2195,7 @@ def launch_gui(
                         "risk": risk,
                         "json_report": str(jpath),
                         "txt_report": str(tpath),
-                        "ok": True,
+                        "ok": complete,
                     },
                 )
 
@@ -1994,10 +2205,12 @@ def launch_gui(
                     log_line(f"[+] Rapport JSON: {jpath}")
                     log_line(f"[+] Rapport TXT : {tpath}")
                     log_line(f"[+] Score risque: {risk}/100")
+                    if not complete:
+                        log_line("[!] Audit incomplet : collecte, scan ou flux en echec. Verifier le JSON.")
                     log_line(f"[+] Liste de menaces mise a jour: {ok_count}/{len(tr)} flux OK")
                     log_line(f"[FIN AUDIT] Termine en {elapsed}")
                     audit_progress_var.set(100.0)
-                    audit_status_var.set(f"[FIN AUDIT] Termine en {elapsed}")
+                    audit_status_var.set(f"[FIN AUDIT] {'Termine' if complete else 'Incomplet'} en {elapsed}")
                     populate_threats(report.get("defender_threat_detections", {}).get("data", []))
                     refresh_reports_tab()
                     audit_button.config(state="normal")
@@ -2075,6 +2288,8 @@ def launch_gui(
         log_line(f"[i] Derniers rapports: {last_json_report} | {last_txt_report}")
     root.protocol("WM_DELETE_WINDOW", on_root_close)
     root.bind("<Unmap>", on_window_unmap)
+    root.after_idle(lambda: set_titlebar_theme(root))
+    root.after(1000, refresh_theme)
     root.mainloop()
     return 0
 
@@ -2109,7 +2324,9 @@ def main() -> int:
     print(f"    - Rapport TXT : {txt_path}")
 
     risk = report.get("risk", {}).get("risk_score_100", 0)
-    if isinstance(risk, int) and risk >= 60:
+    if not audit_is_complete(report):
+        print("[!] Audit incomplet : collecte, scan ou flux en echec. Verifie le JSON avant d'interpreter le score.")
+    elif isinstance(risk, int) and risk >= 60:
         print("[!] Niveau de risque eleve: isole le PC du reseau et lance un scan complet hors ligne.")
     elif isinstance(risk, int) and risk >= 30:
         print("[!] Niveau de risque modere: verifie les installations recentes et les taches/services.")

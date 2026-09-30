@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/scan-system-core", "crates/scan-system-platform"]
+members = ["crates/scan-system-core", "crates/scan-system-platform", "crates/scan-system-sysmon", "crates/scan-system-audit", "crates/scan-system-cli", "crates/scan-system-gui"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.1.1"
 edition = "2021"
 license = "MIT"
 

@@ -26,6 +26,8 @@ pub use firewall::{block_remote_ip, ensure_app_firewall_rule};
 pub use network::trace_remote_ip;
 pub use process::{decode_oem, AuditHandle, HiddenCommandOutput, PowerShellOutput, ProcessError};
 pub use registry::{
-    detect_windows_theme, is_startup_monitoring_enabled, iter_uninstall_registry,
-    set_startup_monitoring_enabled, startup_run_entries, UninstallEntry,
+    detect_windows_theme, is_rust_startup_monitoring_enabled, is_startup_monitoring_enabled,
+    iter_uninstall_registry, migrate_legacy_startup_monitoring,
+    set_rust_startup_monitoring_enabled, set_startup_monitoring_enabled, startup_run_entries,
+    UninstallEntry,
 };

@@ -9,6 +9,8 @@ un score ou un match faux ne "plante" jamais, il se contente d'etre incorrect).
 
 import datetime as dt
 
+import pytest
+
 import scanner_windows as sw
 
 
@@ -25,13 +27,87 @@ def test_suspicious_score_defender_threats_capped_at_60():
     report = {"defender_threat_detections": {"data": [{}] * 5}}
     result = sw.suspicious_score(report)
     assert result["risk_score_100"] == 60
-    assert "Menaces Defender detectees: 5" in result["reasons"][0]
+    assert "Detections Defender a verifier: 5" in result["reasons"][0]
 
 
 def test_suspicious_score_defender_threats_uncapped():
     report = {"defender_threat_detections": {"data": [{}] * 2}}
     result = sw.suspicious_score(report)
     assert result["risk_score_100"] == 40
+
+
+def test_suspicious_score_excludes_handled_defender_history():
+    report = {"defender_threat_detections": {"data": [
+        {"ActionSuccess": True, "CurrentThreatExecutionStatusID": 1},
+        {"ActionSuccess": True, "CurrentThreatExecutionStatusID": 4},
+        {"ActionSuccess": False, "CurrentThreatExecutionStatusID": 1},
+        {"ActionSuccess": True, "CurrentThreatExecutionStatusID": 2},
+    ]}}
+    result = sw.suspicious_score(report)
+    assert result["risk_score_100"] == 40
+    assert result["reasons"] == ["Detections Defender a verifier: 2"]
+
+
+def test_event_log_failure_is_not_an_empty_event_list(monkeypatch):
+    def failure(script, timeout):
+        assert "NoMatchingEventsFound" in script
+        assert "-ErrorAction Stop" in script
+        assert timeout == 120
+        return False, "access denied"
+
+    monkeypatch.setattr(sw, "run_powershell", failure)
+    with pytest.raises(RuntimeError, match="access denied"):
+        sw.recent_persistence_events(1)
+
+
+def test_empty_event_logs_remain_valid(monkeypatch):
+    monkeypatch.setattr(
+        sw, "run_powershell", lambda *_args, **_kwargs: (True, '{"tasks":[],"services":[]}')
+    )
+    assert sw.recent_persistence_events(1) == ([], [])
+
+
+def test_failed_event_collection_marks_audit_incomplete():
+    report = {
+        "parameters": {"update_signatures": False, "run_quick_scan": False},
+        "defender_status": {"ok": True},
+        "defender_threat_detections": {"ok": True},
+        "persistence_collection": {"ok": False, "error": "access denied"},
+        "threat_feeds_refresh": {"feeds": [{"ok": True}]},
+    }
+    assert not sw.audit_is_complete(report)
+
+
+def test_msi_failure_keeps_registry_installs_and_marks_collection_failed(monkeypatch):
+    monkeypatch.setattr(sw, "iter_uninstall_registry", lambda: [])
+
+    def failure(script, timeout):
+        assert "NoMatchingEventsFound" in script
+        assert timeout == 120
+        return False, "access denied"
+
+    monkeypatch.setattr(sw, "run_powershell", failure)
+    status = {}
+    assert sw.recent_installs(1, status) == []
+    assert status == {"ok": False, "error": "access denied"}
+
+
+def test_no_msi_events_is_a_valid_collection(monkeypatch):
+    monkeypatch.setattr(sw, "iter_uninstall_registry", lambda: [])
+    monkeypatch.setattr(sw, "run_powershell", lambda *_args, **_kwargs: (True, "[]"))
+    status = {}
+    assert sw.recent_installs(1, status) == []
+    assert status == {"ok": True}
+
+
+def test_failed_defender_collection_marks_audit_incomplete():
+    report = {
+        "parameters": {"update_signatures": False, "run_quick_scan": False},
+        "defender_status": {"ok": True},
+        "defender_threat_detections": {"ok": False, "error": "access denied"},
+        "threat_feeds_refresh": {"feeds": [{"ok": True}]},
+    }
+    assert not sw.audit_is_complete(report)
 
 
 def test_suspicious_score_installs_thresholds():
@@ -218,6 +294,14 @@ def test_parse_any_datetime_us_format():
 def test_parse_any_datetime_sql_format():
     result = sw.parse_any_datetime("2026-08-25 10:00:00")
     assert result == dt.datetime(2026, 8, 25, 10, 0, 0)
+
+
+def test_parse_any_datetime_powershell_event_json():
+    milliseconds = 1790752330097
+    expected = dt.datetime.fromtimestamp(milliseconds / 1000)
+    assert sw.parse_any_datetime(f"/Date({milliseconds})/") == expected
+    assert sw.parse_any_datetime(f"/Date({milliseconds}+0200)/") == expected
+    assert sw.parse_any_datetime("/Date(invalid)/") is None
 
 
 def test_parse_any_datetime_none_or_blank_or_garbage():

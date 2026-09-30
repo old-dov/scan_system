@@ -35,8 +35,20 @@ pub struct RecentInstall {
     pub display_version: String,
     pub publisher: String,
     pub install_date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_date_raw: Option<String>,
     pub install_location: String,
     pub uninstall_string: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_uninstall_string: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub windows_installer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_hive: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,58 +60,68 @@ pub struct RecentInstall {
 /// event-log fallback (`Id=11707`) for installs the registry's `InstallDate` value
 /// missed. `days` bounds both sources identically (same lookback window).
 ///
+/// The second return value reports an MSI event-log failure while retaining the
+/// registry entries. A genuine empty event log returns `None` instead.
+///
 /// # Errors
 ///
-/// Only [`ProcessError::Cancelled`] propagates from the event-log half; the registry
-/// half cannot fail (a permission error on one hive is already handled as "no entries"
-/// by [`iter_uninstall_registry`]).
+/// Cancellation propagates from the event-log query.
 pub fn recent_installs(
     handle: &AuditHandle,
     days: i64,
-) -> Result<Vec<RecentInstall>, ProcessError> {
-    let cutoff = chrono::Local::now().date_naive() - chrono::Duration::days(days);
+) -> Result<(Vec<RecentInstall>, Option<String>), ProcessError> {
+    // Python compares midnight of InstallDate against the current wall-clock
+    // instant minus `days`; an entry dated exactly `days` ago is therefore too
+    // old after midnight. Keep that boundary rather than comparing dates only.
+    let cutoff = chrono::Local::now().naive_local() - chrono::Duration::days(days);
     let mut out = Vec::new();
 
     for entry in iter_uninstall_registry() {
         if let Some(date) = parse_install_date(&entry.install_date_raw) {
-            if date >= cutoff {
+            if date.and_hms_opt(0, 0, 0).is_some_and(|time| time >= cutoff) {
                 out.push(from_uninstall_entry(entry, date));
             }
         }
     }
 
     let script = format!(
-        "Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='MsiInstaller'; \
-         Id=11707; StartTime=(Get-Date).AddDays(-{days})}} | \
-         Select-Object TimeCreated, Id, LevelDisplayName, Message | ConvertTo-Json -Depth 4"
+        "try {{ $events = @(Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='MsiInstaller'; \
+         Id=11707; StartTime=(Get-Date).AddDays(-{days})}} -ErrorAction Stop | \
+         Select-Object TimeCreated, Id, LevelDisplayName, Message) }}\n\
+         catch {{ if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {{ throw }}; $events = @() }}\n\
+         ConvertTo-Json -InputObject $events -Depth 4"
     );
     let result = handle.run_powershell(&script, Duration::from_secs(120))?;
-    if result.ok && !result.output.is_empty() {
-        if let Ok(value) = serde_json::from_str::<Value>(&result.output) {
-            let items: Vec<Value> = match value {
-                Value::Array(items) => items,
-                other => vec![other],
-            };
-            for item in items {
-                let message = item
-                    .get("Message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                out.push(RecentInstall {
-                    display_name: "(MSI event)".to_string(),
-                    install_date: item
-                        .get("TimeCreated")
-                        .map(value_to_display_string)
-                        .unwrap_or_default(),
-                    event_id: item.get("Id").and_then(Value::as_i64),
-                    event_message: Some(message.chars().take(1200).collect()),
-                    ..RecentInstall::default()
-                });
-            }
-        }
+    if !result.ok {
+        return Ok((out, Some(result.output)));
+    }
+    let value = match serde_json::from_str::<Value>(&result.output) {
+        Ok(Value::Array(items)) => items,
+        Ok(Value::Object(item)) => vec![Value::Object(item)],
+        Ok(_) => return Ok((out, Some("JSON MSI invalide".into()))),
+        Err(error) => return Ok((out, Some(format!("JSON MSI invalide: {error}")))),
+    };
+    if value.iter().any(|item| !item.is_object()) {
+        return Ok((out, Some("JSON MSI invalide".into())));
+    }
+    for item in value {
+        let message = item
+            .get("Message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        out.push(RecentInstall {
+            display_name: "(MSI event)".to_string(),
+            install_date: item
+                .get("TimeCreated")
+                .map(value_to_display_string)
+                .unwrap_or_default(),
+            event_id: item.get("Id").and_then(Value::as_i64),
+            event_message: Some(message.chars().take(1200).collect()),
+            ..RecentInstall::default()
+        });
     }
 
-    Ok(out)
+    Ok((out, None))
 }
 
 fn from_uninstall_entry(entry: UninstallEntry, date: chrono::NaiveDate) -> RecentInstall {
@@ -108,8 +130,14 @@ fn from_uninstall_entry(entry: UninstallEntry, date: chrono::NaiveDate) -> Recen
         display_version: entry.display_version,
         publisher: entry.publisher,
         install_date: date.format("%Y-%m-%d").to_string(),
+        install_date_raw: Some(entry.install_date_raw),
         install_location: entry.install_location,
         uninstall_string: entry.uninstall_string,
+        quiet_uninstall_string: Some(entry.quiet_uninstall_string),
+        display_icon: Some(entry.display_icon),
+        windows_installer: Some(entry.windows_installer),
+        local_package: Some(entry.local_package),
+        registry_hive: Some(entry.registry_hive),
         event_id: None,
         event_message: None,
         registry_subkey: entry.registry_subkey,
@@ -139,9 +167,8 @@ fn event_log_start_expr(days: i64, since: Option<chrono::NaiveDateTime>) -> Stri
 ///
 /// # Errors
 ///
-/// Only [`ProcessError::Cancelled`] propagates; every other failure (including
-/// unparseable JSON) returns two empty lists rather than an error, matching the Python
-/// original's bare `except json.JSONDecodeError: return [], []`.
+/// Returns an error when either log is inaccessible or PowerShell returns invalid
+/// data. A genuine `NoMatchingEventsFound` result still produces empty lists.
 pub fn recent_persistence_events(
     handle: &AuditHandle,
     days: i64,
@@ -149,21 +176,34 @@ pub fn recent_persistence_events(
 ) -> Result<(Vec<Value>, Vec<Value>), ProcessError> {
     let start_expr = event_log_start_expr(days, since);
     let script = format!(
-        "$tasks = @(Get-WinEvent -FilterHashtable @{{\
+        "try {{ $tasks = @(Get-WinEvent -FilterHashtable @{{\
             LogName='Microsoft-Windows-TaskScheduler/Operational'; Id=106; StartTime={start_expr}\
-        }} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message)\n\
-        $services = @(Get-WinEvent -FilterHashtable @{{\
+        }} -ErrorAction Stop | Select-Object TimeCreated, Id, Message) }}\n\
+        catch {{ if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {{ throw }}; $tasks = @() }}\n\
+        try {{ $services = @(Get-WinEvent -FilterHashtable @{{\
             LogName='System'; Id=7045; StartTime={start_expr}\
-        }} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, ProviderName, Message)\n\
+        }} -ErrorAction Stop | Select-Object TimeCreated, Id, ProviderName, Message) }}\n\
+        catch {{ if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {{ throw }}; $services = @() }}\n\
         [PSCustomObject]@{{ tasks = $tasks; services = $services }} | ConvertTo-Json -Depth 4"
     );
     let result = handle.run_powershell(&script, Duration::from_secs(120))?;
-    if !result.ok || result.output.is_empty() {
-        return Ok((vec![], vec![]));
+    parse_persistence_output(result)
+}
+
+fn parse_persistence_output(
+    result: crate::process::PowerShellOutput,
+) -> Result<(Vec<Value>, Vec<Value>), ProcessError> {
+    if !result.ok {
+        return Err(ProcessError::Command(result.output));
     }
-    let Ok(data) = serde_json::from_str::<Value>(&result.output) else {
-        return Ok((vec![], vec![]));
-    };
+    let data = serde_json::from_str::<Value>(&result.output)
+        .map_err(|error| ProcessError::Command(format!("JSON evenements invalide: {error}")))?;
+    let is_list_or_single = |value: &Value| value.is_array() || value.is_object();
+    if !is_list_or_single(&data["tasks"]) || !is_list_or_single(&data["services"]) {
+        return Err(ProcessError::Command(
+            "Listes taches/services absentes du resultat PowerShell".into(),
+        ));
+    }
     let as_list = |key: &str| -> Vec<Value> {
         match data.get(key) {
             Some(Value::Array(items)) => items.clone(),
@@ -195,6 +235,23 @@ mod tests {
     }
 
     #[test]
+    fn registry_install_keeps_python_report_fields() {
+        let entry = UninstallEntry {
+            display_name: "Example".into(),
+            install_date_raw: "20260928".into(),
+            registry_hive: "HKLM".into(),
+            quiet_uninstall_string: String::new(),
+            ..UninstallEntry::default()
+        };
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        let value = serde_json::to_value(from_uninstall_entry(entry, date)).unwrap();
+        assert_eq!(value["install_date_raw"], "20260928");
+        assert_eq!(value["registry_hive"], "HKLM");
+        assert_eq!(value["quiet_uninstall_string"], "");
+        assert!(value.get("event_id").is_none());
+    }
+
+    #[test]
     fn event_log_start_expr_uses_since_when_given() {
         let since = chrono::NaiveDate::from_ymd_opt(2026, 9, 14)
             .unwrap()
@@ -209,5 +266,21 @@ mod tests {
     #[test]
     fn event_log_start_expr_falls_back_to_days() {
         assert_eq!(event_log_start_expr(14, None), "(Get-Date).AddDays(-14)");
+    }
+
+    #[test]
+    fn persistence_failure_is_not_reported_as_no_events() {
+        let failure = crate::process::PowerShellOutput {
+            ok: false,
+            output: "access denied".into(),
+        };
+        assert!(parse_persistence_output(failure).is_err());
+        let no_events = crate::process::PowerShellOutput {
+            ok: true,
+            output: r#"{"tasks":[],"services":[]}"#.into(),
+        };
+        assert!(
+            matches!(parse_persistence_output(no_events), Ok((tasks, services)) if tasks.is_empty() && services.is_empty())
+        );
     }
 }
